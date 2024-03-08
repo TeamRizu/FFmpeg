@@ -33,13 +33,12 @@
 #include "audio.h"
 #include "avfilter.h"
 #include "filters.h"
+#include "formats.h"
 #include "internal.h"
 
 typedef struct ANullContext {
     const AVClass *class;
-    char   *channel_layout_str;
-    uint64_t channel_layout;
-    char   *sample_rate_str;
+    AVChannelLayout ch_layout;
     int     sample_rate;
     int64_t duration;
     int nb_samples;             ///< number of samples per requested frame
@@ -50,10 +49,10 @@ typedef struct ANullContext {
 #define FLAGS AV_OPT_FLAG_AUDIO_PARAM|AV_OPT_FLAG_FILTERING_PARAM
 
 static const AVOption anullsrc_options[]= {
-    { "channel_layout", "set channel_layout", OFFSET(channel_layout_str), AV_OPT_TYPE_STRING, {.str = "stereo"}, 0, 0, FLAGS },
-    { "cl",             "set channel_layout", OFFSET(channel_layout_str), AV_OPT_TYPE_STRING, {.str = "stereo"}, 0, 0, FLAGS },
-    { "sample_rate",    "set sample rate",    OFFSET(sample_rate_str)   , AV_OPT_TYPE_STRING, {.str = "44100"}, 0, 0, FLAGS },
-    { "r",              "set sample rate",    OFFSET(sample_rate_str)   , AV_OPT_TYPE_STRING, {.str = "44100"}, 0, 0, FLAGS },
+    { "channel_layout", "set channel_layout", OFFSET(ch_layout), AV_OPT_TYPE_CHLAYOUT, {.str = "stereo"}, 0, 0, FLAGS },
+    { "cl",             "set channel_layout", OFFSET(ch_layout), AV_OPT_TYPE_CHLAYOUT, {.str = "stereo"}, 0, 0, FLAGS },
+    { "sample_rate",    "set sample rate",    OFFSET(sample_rate)   , AV_OPT_TYPE_INT, {.i64 = 44100}, 1, INT_MAX, FLAGS },
+    { "r",              "set sample rate",    OFFSET(sample_rate)   , AV_OPT_TYPE_INT, {.i64 = 44100}, 1, INT_MAX, FLAGS },
     { "nb_samples",     "set the number of samples per requested frame", OFFSET(nb_samples), AV_OPT_TYPE_INT, {.i64 = 1024}, 1, UINT16_MAX, FLAGS },
     { "n",              "set the number of samples per requested frame", OFFSET(nb_samples), AV_OPT_TYPE_INT, {.i64 = 1024}, 1, UINT16_MAX, FLAGS },
     { "duration",       "set the audio duration",                        OFFSET(duration),   AV_OPT_TYPE_DURATION, {.i64 = -1}, -1, INT64_MAX, FLAGS },
@@ -63,34 +62,18 @@ static const AVOption anullsrc_options[]= {
 
 AVFILTER_DEFINE_CLASS(anullsrc);
 
-static av_cold int init(AVFilterContext *ctx)
-{
-    ANullContext *null = ctx->priv;
-    int ret;
-
-    if ((ret = ff_parse_sample_rate(&null->sample_rate,
-                                     null->sample_rate_str, ctx)) < 0)
-        return ret;
-
-    if ((ret = ff_parse_channel_layout(&null->channel_layout, NULL,
-                                        null->channel_layout_str, ctx)) < 0)
-        return ret;
-
-    return 0;
-}
-
 static int query_formats(AVFilterContext *ctx)
 {
     ANullContext *null = ctx->priv;
-    int64_t chlayouts[] = { null->channel_layout, -1 };
+    const AVChannelLayout chlayouts[] = { null->ch_layout, { 0 } };
     int sample_rates[] = { null->sample_rate, -1 };
     int ret;
 
     if ((ret = ff_set_common_formats         (ctx, ff_all_formats              (AVMEDIA_TYPE_AUDIO))) < 0 ||
-        (ret = ff_set_common_samplerates     (ctx, ff_make_format_list         (sample_rates      ))) < 0)
+        (ret = ff_set_common_samplerates_from_list(ctx, sample_rates)) < 0)
         return ret;
 
-    return ff_set_common_channel_layouts(ctx, ff_make_format64_list(chlayouts));
+    return ff_set_common_channel_layouts_from_list(ctx, chlayouts);
 }
 
 static av_cold int config_props(AVFilterLink *outlink)
@@ -134,17 +117,15 @@ static const AVFilterPad avfilter_asrc_anullsrc_outputs[] = {
         .type          = AVMEDIA_TYPE_AUDIO,
         .config_props  = config_props,
     },
-    { NULL }
 };
 
-AVFilter ff_asrc_anullsrc = {
+const AVFilter ff_asrc_anullsrc = {
     .name          = "anullsrc",
     .description   = NULL_IF_CONFIG_SMALL("Null audio source, return empty audio frames."),
-    .init          = init,
-    .query_formats = query_formats,
     .priv_size     = sizeof(ANullContext),
     .inputs        = NULL,
-    .outputs       = avfilter_asrc_anullsrc_outputs,
+    FILTER_OUTPUTS(avfilter_asrc_anullsrc_outputs),
+    FILTER_QUERY_FUNC(query_formats),
     .activate      = activate,
     .priv_class    = &anullsrc_class,
 };

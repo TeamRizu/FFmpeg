@@ -26,27 +26,6 @@
 
 #include "libavutil/internal.h"
 #include "avfilter.h"
-#include "formats.h"
-#include "framepool.h"
-#include "framequeue.h"
-#include "thread.h"
-#include "version.h"
-#include "video.h"
-#include "libavcodec/avcodec.h"
-#include "libavcodec/internal.h"
-
-typedef struct AVFilterCommand {
-    double time;                ///< time expressed in seconds
-    char *command;              ///< command
-    char *arg;                  ///< optional argument for the command
-    int flags;
-    struct AVFilterCommand *next;
-} AVFilterCommand;
-
-/**
- * Update the position of a link in the age heap.
- */
-void ff_avfilter_graph_update_heap(AVFilterGraph *graph, AVFilterLink *link);
 
 /**
  * A filter pad used for either input or output.
@@ -65,20 +44,36 @@ struct AVFilterPad {
     enum AVMediaType type;
 
     /**
-     * Callback function to get a video buffer. If NULL, the filter system will
-     * use ff_default_get_video_buffer().
+     * The filter expects writable frames from its input link,
+     * duplicating data buffers if needed.
      *
-     * Input video pads only.
+     * input pads only.
      */
-    AVFrame *(*get_video_buffer)(AVFilterLink *link, int w, int h);
+#define AVFILTERPAD_FLAG_NEEDS_WRITABLE                  (1 << 0)
 
     /**
-     * Callback function to get an audio buffer. If NULL, the filter system will
-     * use ff_default_get_audio_buffer().
-     *
-     * Input audio pads only.
+     * The pad's name is allocated and should be freed generically.
      */
-    AVFrame *(*get_audio_buffer)(AVFilterLink *link, int nb_samples);
+#define AVFILTERPAD_FLAG_FREE_NAME                       (1 << 1)
+
+    /**
+     * A combination of AVFILTERPAD_FLAG_* flags.
+     */
+    int flags;
+
+    /**
+     * Callback functions to get a video/audio buffers. If NULL,
+     * the filter system will use ff_default_get_video_buffer() for video
+     * and ff_default_get_audio_buffer() for audio.
+     *
+     * The state of the union is determined by type.
+     *
+     * Input pads only.
+     */
+    union {
+        AVFrame *(*video)(AVFilterLink *link, int w, int h);
+        AVFrame *(*audio)(AVFilterLink *link, int nb_samples);
+    } get_buffer;
 
     /**
      * Filtering callback. This is where a filter receives a frame with
@@ -116,25 +111,76 @@ struct AVFilterPad {
      * and another value on error.
      */
     int (*config_props)(AVFilterLink *link);
+};
 
+typedef struct FFFilterContext {
     /**
-     * The filter expects writable frames from its input link,
-     * duplicating data buffers if needed.
-     *
-     * input pads only.
+     * The public AVFilterContext. See avfilter.h for it.
      */
-    int needs_writable;
-};
+    AVFilterContext p;
 
-struct AVFilterGraphInternal {
-    void *thread;
-    avfilter_execute_func *thread_execute;
-    FFFrameQueueGlobal frame_queues;
-};
-
-struct AVFilterInternal {
     avfilter_execute_func *execute;
+
+    // 1 when avfilter_init_*() was successfully called on this filter
+    // 0 otherwise
+    int initialized;
+} FFFilterContext;
+
+static inline FFFilterContext *fffilterctx(AVFilterContext *ctx)
+{
+    return (FFFilterContext*)ctx;
+}
+
+static av_always_inline int ff_filter_execute(AVFilterContext *ctx, avfilter_action_func *func,
+                                              void *arg, int *ret, int nb_jobs)
+{
+    return fffilterctx(ctx)->execute(ctx, func, arg, ret, nb_jobs);
+}
+
+enum FilterFormatsState {
+    /**
+     * The default value meaning that this filter supports all formats
+     * and (for audio) sample rates and channel layouts/counts as long
+     * as these properties agree for all inputs and outputs.
+     * This state is only allowed in case all inputs and outputs actually
+     * have the same type.
+     * The union is unused in this state.
+     *
+     * This value must always be zero (for default static initialization).
+     */
+    FF_FILTER_FORMATS_PASSTHROUGH = 0,
+    FF_FILTER_FORMATS_QUERY_FUNC,       ///< formats.query active.
+    FF_FILTER_FORMATS_PIXFMT_LIST,      ///< formats.pixels_list active.
+    FF_FILTER_FORMATS_SAMPLEFMTS_LIST,  ///< formats.samples_list active.
+    FF_FILTER_FORMATS_SINGLE_PIXFMT,    ///< formats.pix_fmt active
+    FF_FILTER_FORMATS_SINGLE_SAMPLEFMT, ///< formats.sample_fmt active.
 };
+
+#define FILTER_QUERY_FUNC(func)        \
+        .formats.query_func   = func,  \
+        .formats_state        = FF_FILTER_FORMATS_QUERY_FUNC
+#define FILTER_PIXFMTS_ARRAY(array)    \
+        .formats.pixels_list  = array, \
+        .formats_state        = FF_FILTER_FORMATS_PIXFMT_LIST
+#define FILTER_SAMPLEFMTS_ARRAY(array) \
+        .formats.samples_list = array, \
+        .formats_state        = FF_FILTER_FORMATS_SAMPLEFMTS_LIST
+#define FILTER_PIXFMTS(...)            \
+    FILTER_PIXFMTS_ARRAY(((const enum AVPixelFormat []) { __VA_ARGS__, AV_PIX_FMT_NONE }))
+#define FILTER_SAMPLEFMTS(...)         \
+    FILTER_SAMPLEFMTS_ARRAY(((const enum AVSampleFormat[]) { __VA_ARGS__, AV_SAMPLE_FMT_NONE }))
+#define FILTER_SINGLE_PIXFMT(pix_fmt_)  \
+        .formats.pix_fmt = pix_fmt_,    \
+        .formats_state   = FF_FILTER_FORMATS_SINGLE_PIXFMT
+#define FILTER_SINGLE_SAMPLEFMT(sample_fmt_) \
+        .formats.sample_fmt = sample_fmt_,   \
+        .formats_state      = FF_FILTER_FORMATS_SINGLE_SAMPLEFMT
+
+#define FILTER_INOUTPADS(inout, array) \
+       .inout        = array, \
+       .nb_ ## inout = FF_ARRAY_ELEMS(array)
+#define FILTER_INPUTS(array) FILTER_INOUTPADS(inputs, (array))
+#define FILTER_OUTPUTS(array) FILTER_INOUTPADS(outputs, (array))
 
 /**
  * Tell if an integer is contained in the provided -1-terminated list of integers.
@@ -146,6 +192,12 @@ struct AVFilterInternal {
  * @return 1 if present, 0 if absent
  */
 int ff_fmt_is_in(int fmt, const int *fmts);
+
+/**
+ * Returns true if a pixel format is "regular YUV", which includes all pixel
+ * formats that are affected by YUV colorspace negotiation.
+ */
+int ff_fmt_is_regular_yuv(enum AVPixelFormat fmt);
 
 /* Functions to parse audio format arguments */
 
@@ -182,10 +234,8 @@ int ff_parse_sample_rate(int *ret, const char *arg, void *log_ctx);
  * @return >= 0 in case of success, a negative AVERROR code on error
  */
 av_warn_unused_result
-int ff_parse_channel_layout(int64_t *ret, int *nret, const char *arg,
+int ff_parse_channel_layout(AVChannelLayout *ret, int *nret, const char *arg,
                             void *log_ctx);
-
-void ff_update_link_current_pts(AVFilterLink *link, int64_t pts);
 
 /**
  * Set the status field of a link from the source filter.
@@ -196,14 +246,6 @@ void ff_update_link_current_pts(AVFilterLink *link, int64_t pts);
  */
 void ff_avfilter_link_set_in_status(AVFilterLink *link, int status, int64_t pts);
 
-/**
- * Set the status field of a link from the destination filter.
- * The pts should probably be left unset (AV_NOPTS_VALUE).
- */
-void ff_avfilter_link_set_out_status(AVFilterLink *link, int status, int64_t pts);
-
-void ff_command_queue_pop(AVFilterContext *filter);
-
 #define D2TS(d)      (isnan(d) ? AV_NOPTS_VALUE : (int64_t)(d))
 #define TS2D(ts)     ((ts) == AV_NOPTS_VALUE ? NAN : (double)(ts))
 #define TS2T(ts, tb) ((ts) == AV_NOPTS_VALUE ? NAN : (double)(ts) * av_q2d(tb))
@@ -212,45 +254,22 @@ void ff_command_queue_pop(AVFilterContext *filter);
 
 #define FF_TPRINTF_START(ctx, func) ff_tlog(NULL, "%-16s: ", #func)
 
-char *ff_get_ref_perms_string(char *buf, size_t buf_size, int perms);
-
-void ff_tlog_ref(void *ctx, AVFrame *ref, int end);
-
+#ifdef TRACE
 void ff_tlog_link(void *ctx, AVFilterLink *link, int end);
+#else
+#define ff_tlog_link(ctx, link, end) do { } while(0)
+#endif
 
 /**
- * Insert a new pad.
+ * Append a new input/output pad to the filter's list of such pads.
  *
- * @param idx Insertion point. Pad is inserted at the end if this point
- *            is beyond the end of the list of pads.
- * @param count Pointer to the number of pads in the list
- * @param padidx_off Offset within an AVFilterLink structure to the element
- *                   to increment when inserting a new pad causes link
- *                   numbering to change
- * @param pads Pointer to the pointer to the beginning of the list of pads
- * @param links Pointer to the pointer to the beginning of the list of links
- * @param newpad The new pad to add. A copy is made when adding.
- * @return >= 0 in case of success, a negative AVERROR code on error
+ * The *_free_name versions will set the AVFILTERPAD_FLAG_FREE_NAME flag
+ * ensuring that the name will be freed generically (even on insertion error).
  */
-int ff_insert_pad(unsigned idx, unsigned *count, size_t padidx_off,
-                   AVFilterPad **pads, AVFilterLink ***links,
-                   AVFilterPad *newpad);
-
-/** Insert a new input pad for the filter. */
-static inline int ff_insert_inpad(AVFilterContext *f, unsigned index,
-                                   AVFilterPad *p)
-{
-    return ff_insert_pad(index, &f->nb_inputs, offsetof(AVFilterLink, dstpad),
-                  &f->input_pads, &f->inputs, p);
-}
-
-/** Insert a new output pad for the filter. */
-static inline int ff_insert_outpad(AVFilterContext *f, unsigned index,
-                                    AVFilterPad *p)
-{
-    return ff_insert_pad(index, &f->nb_outputs, offsetof(AVFilterLink, srcpad),
-                  &f->output_pads, &f->outputs, p);
-}
+int ff_append_inpad (AVFilterContext *f, AVFilterPad *p);
+int ff_append_outpad(AVFilterContext *f, AVFilterPad *p);
+int ff_append_inpad_free_name (AVFilterContext *f, AVFilterPad *p);
+int ff_append_outpad_free_name(AVFilterContext *f, AVFilterPad *p);
 
 /**
  * Request an input frame from the filter at the other end of the link.
@@ -285,14 +304,16 @@ static inline int ff_insert_outpad(AVFilterContext *f, unsigned index,
  */
 int ff_request_frame(AVFilterLink *link);
 
-#define AVFILTER_DEFINE_CLASS(fname)            \
-    static const AVClass fname##_class = {      \
-        .class_name = #fname,                   \
+#define AVFILTER_DEFINE_CLASS_EXT(name, desc, options) \
+    static const AVClass name##_class = {       \
+        .class_name = desc,                     \
         .item_name  = av_default_item_name,     \
-        .option     = fname##_options,          \
+        .option     = options,                  \
         .version    = LIBAVUTIL_VERSION_INT,    \
         .category   = AV_CLASS_CATEGORY_FILTER, \
     }
+#define AVFILTER_DEFINE_CLASS(fname) \
+    AVFILTER_DEFINE_CLASS_EXT(fname, #fname, fname##_options)
 
 /**
  * Find the index of a link.
@@ -316,23 +337,6 @@ int ff_request_frame(AVFilterLink *link);
 int ff_filter_frame(AVFilterLink *link, AVFrame *frame);
 
 /**
- * Allocate a new filter context and return it.
- *
- * @param filter what filter to create an instance of
- * @param inst_name name to give to the new filter context
- *
- * @return newly created filter context or NULL on failure
- */
-AVFilterContext *ff_filter_alloc(const AVFilter *filter, const char *inst_name);
-
-int ff_filter_activate(AVFilterContext *filter);
-
-/**
- * Remove a filter from a graph;
- */
-void ff_filter_graph_remove_filter(AVFilterGraph *graph, AVFilterContext *filter);
-
-/**
  * The filter is aware of hardware frames, and any hardware frame context
  * should not be automatically propagated through it.
  */
@@ -344,30 +348,16 @@ void ff_filter_graph_remove_filter(AVFilterGraph *graph, AVFilterContext *filter
 int ff_filter_graph_run_once(AVFilterGraph *graph);
 
 /**
- * Normalize the qscale factor
- * FIXME the H264 qscale is a log based scale, mpeg1/2 is not, the code below
- *       cannot be optimal
- */
-static inline int ff_norm_qscale(int qscale, int type)
-{
-    switch (type) {
-    case FF_QSCALE_TYPE_MPEG1: return qscale;
-    case FF_QSCALE_TYPE_MPEG2: return qscale >> 1;
-    case FF_QSCALE_TYPE_H264:  return qscale >> 2;
-    case FF_QSCALE_TYPE_VP56:  return (63 - qscale + 2) >> 2;
-    }
-    return qscale;
-}
-
-/**
  * Get number of threads for current filter instance.
  * This number is always same or less than graph->nb_threads.
  */
-int ff_filter_get_nb_threads(AVFilterContext *ctx);
+int ff_filter_get_nb_threads(AVFilterContext *ctx) av_pure;
 
 /**
  * Generic processing of user supplied commands that are set
  * in the same way as the filter options.
+ * NOTE: 'enable' option is handled separately, and not by
+ * this function.
  */
 int ff_filter_process_command(AVFilterContext *ctx, const char *cmd,
                               const char *arg, char *res, int res_len, int flags);

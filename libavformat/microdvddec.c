@@ -21,6 +21,7 @@
  */
 
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 #include "subtitles.h"
 #include "libavutil/intreadwrite.h"
@@ -65,12 +66,12 @@ static int64_t get_pts(const char *buf)
     return AV_NOPTS_VALUE;
 }
 
-static int get_duration(const char *buf)
+static int64_t get_duration(const char *buf)
 {
     int frame_start, frame_end;
 
     if (sscanf(buf, "{%d}{%d}", &frame_start, &frame_end) == 2)
-        return frame_end - frame_start;
+        return frame_end - (int64_t)frame_start;
     return -1;
 }
 
@@ -121,7 +122,7 @@ static int microdvd_read_header(AVFormatContext *s)
                 int size = strlen(line + 11);
                 ret = ff_alloc_extradata(st->codecpar, size);
                 if (ret < 0)
-                    goto fail;
+                    return ret;
                 memcpy(st->codecpar->extradata, line + 11, size);
                 continue;
             }
@@ -142,10 +143,8 @@ static int microdvd_read_header(AVFormatContext *s)
         if (pts == AV_NOPTS_VALUE)
             continue;
         sub = ff_subtitles_queue_insert(&microdvd->q, p, strlen(p), 0);
-        if (!sub) {
-            ret = AVERROR(ENOMEM);
-            goto fail;
-        }
+        if (!sub)
+            return AVERROR(ENOMEM);
         sub->pos = pos;
         sub->pts = pts;
         sub->duration = get_duration(line);
@@ -162,9 +161,6 @@ static int microdvd_read_header(AVFormatContext *s)
     st->codecpar->codec_type = AVMEDIA_TYPE_SUBTITLE;
     st->codecpar->codec_id   = AV_CODEC_ID_MICRODVD;
     return 0;
-fail:
-    ff_subtitles_queue_clean(&microdvd->q);
-    return ret;
 }
 
 static int microdvd_read_packet(AVFormatContext *s, AVPacket *pkt)
@@ -203,14 +199,15 @@ static const AVClass microdvd_class = {
     .version    = LIBAVUTIL_VERSION_INT,
 };
 
-AVInputFormat ff_microdvd_demuxer = {
-    .name           = "microdvd",
-    .long_name      = NULL_IF_CONFIG_SMALL("MicroDVD subtitle format"),
+const FFInputFormat ff_microdvd_demuxer = {
+    .p.name         = "microdvd",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("MicroDVD subtitle format"),
+    .p.priv_class   = &microdvd_class,
     .priv_data_size = sizeof(MicroDVDContext),
+    .flags_internal = FF_FMT_INIT_CLEANUP,
     .read_probe     = microdvd_probe,
     .read_header    = microdvd_read_header,
     .read_packet    = microdvd_read_packet,
     .read_seek2     = microdvd_read_seek,
     .read_close     = microdvd_read_close,
-    .priv_class     = &microdvd_class,
 };

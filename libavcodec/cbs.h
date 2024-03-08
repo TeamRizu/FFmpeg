@@ -24,7 +24,10 @@
 
 #include "libavutil/buffer.h"
 
-#include "avcodec.h"
+#include "codec_id.h"
+#include "codec_par.h"
+#include "defs.h"
+#include "packet.h"
 
 
 /*
@@ -40,6 +43,7 @@
  * bitstream.
  */
 
+struct AVCodecContext;
 struct CodedBitstreamType;
 
 /**
@@ -102,10 +106,10 @@ typedef struct CodedBitstreamUnit {
      */
     void *content;
     /**
-     * If content is reference counted, a reference to the buffer containing
-     * content.  Null if content is not reference counted.
+     * If content is reference counted, a RefStruct reference backing content.
+     * NULL if content is not reference counted.
      */
-    AVBufferRef *content_ref;
+    void *content_ref;
 } CodedBitstreamUnit;
 
 /**
@@ -164,6 +168,51 @@ typedef struct CodedBitstreamFragment {
     CodedBitstreamUnit *units;
 } CodedBitstreamFragment;
 
+
+struct CodedBitstreamContext;
+struct GetBitContext;
+struct PutBitContext;
+
+/**
+ * Callback type for read tracing.
+ *
+ * @param ctx         User-set trace context.
+ * @param gbc         A GetBitContext set at the start of the syntax
+ *                    element.  This is a copy, the callee does not
+ *                    need to preserve it.
+ * @param length      Length in bits of the syntax element.
+ * @param name        String name of the syntax elements.
+ * @param subscripts  If the syntax element is an array, a pointer to
+ *                    an array of subscripts into the array.
+ * @param value       Parsed value of the syntax element.
+ */
+typedef void (*CBSTraceReadCallback)(void *trace_context,
+                                     struct GetBitContext *gbc,
+                                     int start_position,
+                                     const char *name,
+                                     const int *subscripts,
+                                     int64_t value);
+
+/**
+ * Callback type for write tracing.
+ *
+ * @param ctx         User-set trace context.
+ * @param pbc         A PutBitContext set at the end of the syntax
+ *                    element.  The user must not modify this, but may
+ *                    inspect it to determine state.
+ * @param length      Length in bits of the syntax element.
+ * @param name        String name of the syntax elements.
+ * @param subscripts  If the syntax element is an array, a pointer to
+ *                    an array of subscripts into the array.
+ * @param value       Written value of the syntax element.
+ */
+typedef void (*CBSTraceWriteCallback)(void *trace_context,
+                                      struct PutBitContext *pbc,
+                                      int start_position,
+                                      const char *name,
+                                      const int *subscripts,
+                                      int64_t value);
+
 /**
  * Context structure for coded bitstream operations.
  */
@@ -196,7 +245,7 @@ typedef struct CodedBitstreamContext {
      * Types not in this list will be available in bitstream form only.
      * If NULL, all supported types will be decomposed.
      */
-    CodedBitstreamUnitType *decompose_unit_types;
+    const CodedBitstreamUnitType *decompose_unit_types;
     /**
      * Length of the decompose_unit_types array.
      */
@@ -207,11 +256,29 @@ typedef struct CodedBitstreamContext {
      */
     int trace_enable;
     /**
-     * Log level to use for trace output.
+     * Log level to use for default trace output.
      *
      * From AV_LOG_*; defaults to AV_LOG_TRACE.
      */
     int trace_level;
+    /**
+     * User context pointer to pass to trace callbacks.
+     */
+    void *trace_context;
+    /**
+     * Callback for read tracing.
+     *
+     * If tracing is enabled then this is called once for each syntax
+     * element parsed.
+     */
+    CBSTraceReadCallback  trace_read_callback;
+    /**
+     * Callback for write tracing.
+     *
+     * If tracing is enabled then this is called once for each syntax
+     * element written.
+     */
+    CBSTraceWriteCallback trace_write_callback;
 
     /**
      * Write buffer. Used as intermediate buffer when writing units.
@@ -271,7 +338,11 @@ int ff_cbs_read_extradata(CodedBitstreamContext *ctx,
  */
 int ff_cbs_read_extradata_from_codec(CodedBitstreamContext *ctx,
                                      CodedBitstreamFragment *frag,
-                                     const AVCodecContext *avctx);
+                                     const struct AVCodecContext *avctx);
+
+int ff_cbs_read_packet_side_data(CodedBitstreamContext *ctx,
+                                 CodedBitstreamFragment *frag,
+                                 const AVPacket *pkt);
 
 /**
  * Read the data bitstream from a packet into a fragment, then
@@ -357,52 +428,35 @@ void ff_cbs_fragment_reset(CodedBitstreamFragment *frag);
 void ff_cbs_fragment_free(CodedBitstreamFragment *frag);
 
 /**
- * Allocate a new internal content buffer of the given size in the unit.
- *
- * The content will be zeroed.
- */
-int ff_cbs_alloc_unit_content(CodedBitstreamUnit *unit,
-                              size_t size,
-                              void (*free)(void *opaque, uint8_t *content));
-
-/**
  * Allocate a new internal content buffer matching the type of the unit.
  *
  * The content will be zeroed.
  */
-int ff_cbs_alloc_unit_content2(CodedBitstreamContext *ctx,
-                               CodedBitstreamUnit *unit);
-
-
-/**
- * Allocate a new internal data buffer of the given size in the unit.
- *
- * The data buffer will have input padding.
- */
-int ff_cbs_alloc_unit_data(CodedBitstreamUnit *unit,
-                           size_t size);
+int ff_cbs_alloc_unit_content(CodedBitstreamContext *ctx,
+                              CodedBitstreamUnit *unit);
 
 /**
  * Insert a new unit into a fragment with the given content.
  *
+ * If content_ref is supplied, it has to be a RefStruct reference
+ * backing content; the user keeps ownership of the supplied reference.
  * The content structure continues to be owned by the caller if
- * content_buf is not supplied.
+ * content_ref is not supplied.
  */
 int ff_cbs_insert_unit_content(CodedBitstreamFragment *frag,
                                int position,
                                CodedBitstreamUnitType type,
                                void *content,
-                               AVBufferRef *content_buf);
+                               void *content_ref);
 
 /**
- * Insert a new unit into a fragment with the given data bitstream.
+ * Add a new unit to a fragment with the given data bitstream.
  *
  * If data_buf is not supplied then data must have been allocated with
  * av_malloc() and will on success become owned by the unit after this
  * call or freed on error.
  */
-int ff_cbs_insert_unit_data(CodedBitstreamFragment *frag,
-                            int position,
+int ff_cbs_append_unit_data(CodedBitstreamFragment *frag,
                             CodedBitstreamUnitType type,
                             uint8_t *data, size_t data_size,
                             AVBufferRef *data_buf);
@@ -444,5 +498,44 @@ int ff_cbs_make_unit_refcounted(CodedBitstreamContext *ctx,
 int ff_cbs_make_unit_writable(CodedBitstreamContext *ctx,
                               CodedBitstreamUnit *unit);
 
+enum CbsDiscardFlags {
+    DISCARD_FLAG_NONE = 0,
+
+    /**
+     * keep non-vcl units even if the picture has been dropped.
+     */
+    DISCARD_FLAG_KEEP_NON_VCL = 0x01,
+};
+
+/**
+ * Discard units accroding to 'skip'.
+ */
+void ff_cbs_discard_units(CodedBitstreamContext *ctx,
+                          CodedBitstreamFragment *frag,
+                          enum AVDiscard skip,
+                          int flags);
+
+
+/**
+ * Helper function for read tracing which formats the syntax element
+ * and logs the result.
+ *
+ * Trace context should be set to the CodedBitstreamContext.
+ */
+void ff_cbs_trace_read_log(void *trace_context,
+                           struct GetBitContext *gbc, int length,
+                           const char *str, const int *subscripts,
+                           int64_t value);
+
+/**
+ * Helper function for write tracing which formats the syntax element
+ * and logs the result.
+ *
+ * Trace context should be set to the CodedBitstreamContext.
+ */
+void ff_cbs_trace_write_log(void *trace_context,
+                            struct PutBitContext *pbc, int length,
+                            const char *str, const int *subscripts,
+                            int64_t value);
 
 #endif /* AVCODEC_CBS_H */

@@ -18,14 +18,24 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include <stdint.h>
+
+#include "libavutil/dict.h"
 #include "libavutil/imgutils.h"
+#include "libavutil/log.h"
+#include "libavutil/pixfmt.h"
+
+#include "libavformat/avformat.h"
+
+#include "libavcodec/avcodec.h"
+
 #include "lavfutils.h"
 
 int ff_load_image(uint8_t *data[4], int linesize[4],
                   int *w, int *h, enum AVPixelFormat *pix_fmt,
                   const char *filename, void *log_ctx)
 {
-    AVInputFormat *iformat = NULL;
+    const AVInputFormat *iformat = NULL;
     AVFormatContext *format_ctx = NULL;
     const AVCodec *codec;
     AVCodecContext *codec_ctx = NULL;
@@ -107,7 +117,8 @@ int ff_load_image(uint8_t *data[4], int linesize[4],
         goto end;
     ret = 0;
 
-    av_image_copy(data, linesize, (const uint8_t **)frame->data, frame->linesize, *pix_fmt, *w, *h);
+    av_image_copy2(data, linesize, frame->data, frame->linesize,
+                   *pix_fmt, *w, *h);
 
 end:
     avcodec_free_context(&codec_ctx);

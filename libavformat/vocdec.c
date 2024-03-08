@@ -20,6 +20,7 @@
  */
 
 #include "libavutil/intreadwrite.h"
+#include "demux.h"
 #include "voc.h"
 #include "internal.h"
 
@@ -73,6 +74,7 @@ static int voc_read_seek(AVFormatContext *s, int stream_index,
 {
     VocDecContext *voc = s->priv_data;
     AVStream *st;
+    FFStream *sti;
     int index;
 
     if (s->nb_streams < 1) {
@@ -81,16 +83,17 @@ static int voc_read_seek(AVFormatContext *s, int stream_index,
     }
 
     st = s->streams[stream_index];
+    sti = ffstream(st);
     index = av_index_search_timestamp(st, timestamp, flags);
 
-    if (index >= 0 && index < st->internal->nb_index_entries - 1) {
-        AVIndexEntry *e = &st->internal->index_entries[index];
+    if (index >= 0 && index < sti->nb_index_entries - 1) {
+        const AVIndexEntry *const e = &sti->index_entries[index];
         avio_seek(s->pb, e->pos, SEEK_SET);
         voc->pts = e->timestamp;
         voc->remaining_size = e->size;
         return 0;
-    } else if (st->internal->nb_index_entries && st->internal->index_entries[0].timestamp <= timestamp) {
-        AVIndexEntry *e = &st->internal->index_entries[st->internal->nb_index_entries - 1];
+    } else if (sti->nb_index_entries && sti->index_entries[0].timestamp <= timestamp) {
+        const AVIndexEntry *const e = &sti->index_entries[sti->nb_index_entries - 1];
         // prepare context for seek_frame_generic()
         voc->pts = e->timestamp;
         voc->remaining_size = e->size;
@@ -98,13 +101,13 @@ static int voc_read_seek(AVFormatContext *s, int stream_index,
     return -1;
 }
 
-AVInputFormat ff_voc_demuxer = {
-    .name           = "voc",
-    .long_name      = NULL_IF_CONFIG_SMALL("Creative Voice"),
+const FFInputFormat ff_voc_demuxer = {
+    .p.name         = "voc",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("Creative Voice"),
+    .p.codec_tag    = ff_voc_codec_tags_list,
     .priv_data_size = sizeof(VocDecContext),
     .read_probe     = voc_probe,
     .read_header    = voc_read_header,
     .read_packet    = voc_read_packet,
     .read_seek      = voc_read_seek,
-    .codec_tag      = (const AVCodecTag* const []){ ff_voc_codec_tags, 0 },
 };

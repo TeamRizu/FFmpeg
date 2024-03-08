@@ -26,20 +26,22 @@
 #include "avfilter.h"
 #include "internal.h"
 
+#define BINS 32768
+
 typedef struct ChannelStats {
     uint64_t nb_samples;
     uint64_t blknum;
     float peak;
     float sum;
-    uint32_t peaks[10001];
-    uint32_t rms[10001];
+    uint32_t peaks[BINS+1];
+    uint32_t rms[BINS+1];
 } ChannelStats;
 
 typedef struct DRMeterContext {
     const AVClass *class;
     ChannelStats *chstats;
     int nb_channels;
-    uint64_t tc_samples;
+    int64_t tc_samples;
     double time_constant;
 } DRMeterContext;
 
@@ -53,45 +55,15 @@ static const AVOption drmeter_options[] = {
 
 AVFILTER_DEFINE_CLASS(drmeter);
 
-static int query_formats(AVFilterContext *ctx)
-{
-    AVFilterFormats *formats;
-    AVFilterChannelLayouts *layouts;
-    static const enum AVSampleFormat sample_fmts[] = {
-        AV_SAMPLE_FMT_FLTP, AV_SAMPLE_FMT_FLT,
-        AV_SAMPLE_FMT_NONE
-    };
-    int ret;
-
-    layouts = ff_all_channel_counts();
-    if (!layouts)
-        return AVERROR(ENOMEM);
-    ret = ff_set_common_channel_layouts(ctx, layouts);
-    if (ret < 0)
-        return ret;
-
-    formats = ff_make_format_list(sample_fmts);
-    if (!formats)
-        return AVERROR(ENOMEM);
-    ret = ff_set_common_formats(ctx, formats);
-    if (ret < 0)
-        return ret;
-
-    formats = ff_all_samplerates();
-    if (!formats)
-        return AVERROR(ENOMEM);
-    return ff_set_common_samplerates(ctx, formats);
-}
-
 static int config_output(AVFilterLink *outlink)
 {
     DRMeterContext *s = outlink->src->priv;
 
-    s->chstats = av_calloc(sizeof(*s->chstats), outlink->channels);
+    s->chstats = av_calloc(outlink->ch_layout.nb_channels, sizeof(*s->chstats));
     if (!s->chstats)
         return AVERROR(ENOMEM);
-    s->nb_channels = outlink->channels;
-    s->tc_samples = s->time_constant * outlink->sample_rate + .5;
+    s->nb_channels = outlink->ch_layout.nb_channels;
+    s->tc_samples = lrint(s->time_constant * outlink->sample_rate);
 
     return 0;
 }
@@ -101,10 +73,10 @@ static void finish_block(ChannelStats *p)
     int peak_bin, rms_bin;
     float peak, rms;
 
-    rms = sqrt(2 * p->sum / p->nb_samples);
+    rms = sqrtf(2.f * p->sum / p->nb_samples);
     peak = p->peak;
-    rms_bin = av_clip(rms * 10000, 0, 10000);
-    peak_bin = av_clip(peak * 10000, 0, 10000);
+    rms_bin = av_clip(lrintf(rms * BINS), 0, BINS);
+    peak_bin = av_clip(lrintf(peak * BINS), 0, BINS);
     p->rms[rms_bin]++;
     p->peaks[peak_bin]++;
 
@@ -116,36 +88,33 @@ static void finish_block(ChannelStats *p)
 
 static void update_stat(DRMeterContext *s, ChannelStats *p, float sample)
 {
-    if (p->nb_samples >= s->tc_samples) {
-        finish_block(p);
-    }
-
-    p->peak = FFMAX(FFABS(sample), p->peak);
+    p->peak = fmaxf(fabsf(sample), p->peak);
     p->sum += sample * sample;
     p->nb_samples++;
+    if (p->nb_samples >= s->tc_samples)
+        finish_block(p);
 }
 
 static int filter_frame(AVFilterLink *inlink, AVFrame *buf)
 {
     DRMeterContext *s = inlink->dst->priv;
     const int channels = s->nb_channels;
-    int i, c;
 
     switch (inlink->format) {
     case AV_SAMPLE_FMT_FLTP:
-        for (c = 0; c < channels; c++) {
+        for (int c = 0; c < channels; c++) {
             ChannelStats *p = &s->chstats[c];
             const float *src = (const float *)buf->extended_data[c];
 
-            for (i = 0; i < buf->nb_samples; i++, src++)
+            for (int i = 0; i < buf->nb_samples; i++, src++)
                 update_stat(s, p, *src);
         }
         break;
     case AV_SAMPLE_FMT_FLT: {
         const float *src = (const float *)buf->extended_data[0];
 
-        for (i = 0; i < buf->nb_samples; i++) {
-            for (c = 0; c < channels; c++, src++)
+        for (int i = 0; i < buf->nb_samples; i++) {
+            for (int c = 0; c < channels; c++, src++)
                 update_stat(s, &s->chstats[c], *src);
         }}
         break;
@@ -159,39 +128,47 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *buf)
 static void print_stats(AVFilterContext *ctx)
 {
     DRMeterContext *s = ctx->priv;
-    float dr = 0;
-    int ch;
+    float dr = 0.f;
 
-    for (ch = 0; ch < s->nb_channels; ch++) {
+    for (int ch = 0; ch < s->nb_channels; ch++) {
         ChannelStats *p = &s->chstats[ch];
-        float chdr, secondpeak, rmssum = 0;
-        int i, j, first = 0;
+        float chdr, secondpeak, rmssum = 0.f;
+        int first = 0, last = lrintf(0.2f * p->blknum);
+        int peak_bin = BINS;
 
-        finish_block(p);
+        if (!p->nb_samples) {
+            av_log(ctx, AV_LOG_INFO, "No data, dynamic range not meassurable\n");
+            return;
+        }
 
-        for (i = 0; i <= 10000; i++) {
-            if (p->peaks[10000 - i]) {
-                if (first)
+        if (p->nb_samples)
+            finish_block(p);
+
+        for (int i = BINS; i >= 0; i--) {
+            if (p->peaks[i]) {
+                if (first || p->peaks[i] > 1) {
+                    peak_bin = i;
                     break;
+                }
                 first = 1;
             }
         }
 
-        secondpeak = (10000 - i) / 10000.;
+        secondpeak = peak_bin / (float)BINS;
 
-        for (i = 10000, j = 0; i >= 0 && j < 0.2 * p->blknum; i--) {
+        for (int64_t i = BINS, j = 0; i >= 0 && j < last; i--) {
             if (p->rms[i]) {
-                rmssum += SQR(i / 10000.) * p->rms[i];
+                rmssum += SQR(i / (float)BINS) * p->rms[i];
                 j += p->rms[i];
             }
         }
 
-        chdr = 20 * log10(secondpeak / sqrt(rmssum / (0.2 * p->blknum)));
+        chdr = 20.f * log10f(secondpeak / sqrtf(rmssum / (float)last));
         dr += chdr;
-        av_log(ctx, AV_LOG_INFO, "Channel %d: DR: %.1f\n", ch + 1, chdr);
+        av_log(ctx, AV_LOG_INFO, "Channel %d: DR: %g\n", ch + 1, chdr);
     }
 
-    av_log(ctx, AV_LOG_INFO, "Overall DR: %.1f\n", dr / s->nb_channels);
+    av_log(ctx, AV_LOG_INFO, "Overall DR: %g\n", dr / s->nb_channels);
 }
 
 static av_cold void uninit(AVFilterContext *ctx)
@@ -209,7 +186,6 @@ static const AVFilterPad drmeter_inputs[] = {
         .type         = AVMEDIA_TYPE_AUDIO,
         .filter_frame = filter_frame,
     },
-    { NULL }
 };
 
 static const AVFilterPad drmeter_outputs[] = {
@@ -218,16 +194,16 @@ static const AVFilterPad drmeter_outputs[] = {
         .type         = AVMEDIA_TYPE_AUDIO,
         .config_props = config_output,
     },
-    { NULL }
 };
 
-AVFilter ff_af_drmeter = {
+const AVFilter ff_af_drmeter = {
     .name          = "drmeter",
     .description   = NULL_IF_CONFIG_SMALL("Measure audio dynamic range."),
-    .query_formats = query_formats,
     .priv_size     = sizeof(DRMeterContext),
     .priv_class    = &drmeter_class,
     .uninit        = uninit,
-    .inputs        = drmeter_inputs,
-    .outputs       = drmeter_outputs,
+    .flags         = AVFILTER_FLAG_METADATA_ONLY,
+    FILTER_INPUTS(drmeter_inputs),
+    FILTER_OUTPUTS(drmeter_outputs),
+    FILTER_SAMPLEFMTS(AV_SAMPLE_FMT_FLTP, AV_SAMPLE_FMT_FLT),
 };

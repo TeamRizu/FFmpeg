@@ -22,7 +22,7 @@
 
 #include "libavutil/common.h"
 #include "libavutil/intreadwrite.h"
-#include "libavutil/mem.h"
+#include "libavutil/mem_internal.h"
 
 #include "libavcodec/lossless_videoencdsp.h"
 
@@ -52,8 +52,8 @@ static void check_diff_bytes(LLVidEncDSPContext *c)
     LOCAL_ALIGNED_32(uint8_t, src2, [MAX_STRIDE]);
     LOCAL_ALIGNED_32(uint8_t, src3, [MAX_STRIDE]);
 
-    declare_func_emms(AV_CPU_FLAG_MMX, void, uint8_t *dst, const uint8_t *src1,
-                      const uint8_t *src2, intptr_t w);
+    declare_func(void, uint8_t *dst, const uint8_t *src1,
+                 const uint8_t *src2, intptr_t w);
 
     memset(dst0, 0, MAX_STRIDE);
     memset(dst1, 0, MAX_STRIDE);
@@ -81,8 +81,8 @@ static void check_sub_left_pred(LLVidEncDSPContext *c)
     LOCAL_ALIGNED_32(uint8_t, src0, [MAX_STRIDE * MAX_HEIGHT]);
     LOCAL_ALIGNED_32(uint8_t, src1, [MAX_STRIDE * MAX_HEIGHT]);
 
-    declare_func_emms(AV_CPU_FLAG_MMX, void, uint8_t *dst, const uint8_t *src,
-                      ptrdiff_t stride, ptrdiff_t width, int height);
+    declare_func(void, uint8_t *dst, const uint8_t *src,
+                 ptrdiff_t stride, ptrdiff_t width, int height);
 
     memset(dst0, 0, MAX_STRIDE * MAX_HEIGHT);
     memset(dst1, 0, MAX_STRIDE * MAX_HEIGHT);

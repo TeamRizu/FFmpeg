@@ -24,6 +24,7 @@
 #include "libavutil/intreadwrite.h"
 #include "libavcodec/mjpeg.h"
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 #include "avio.h"
 
@@ -57,8 +58,7 @@ static int mxg_read_header(AVFormatContext *s)
         return AVERROR(ENOMEM);
     audio_st->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
     audio_st->codecpar->codec_id = AV_CODEC_ID_PCM_ALAW;
-    audio_st->codecpar->channels = 1;
-    audio_st->codecpar->channel_layout = AV_CH_LAYOUT_MONO;
+    audio_st->codecpar->ch_layout = (AVChannelLayout)AV_CHANNEL_LAYOUT_MONO;
     audio_st->codecpar->sample_rate = 8000;
     audio_st->codecpar->bits_per_coded_sample = 8;
     audio_st->codecpar->block_align = 1;
@@ -249,12 +249,12 @@ static int mxg_close(struct AVFormatContext *s)
     return 0;
 }
 
-AVInputFormat ff_mxg_demuxer = {
-    .name           = "mxg",
-    .long_name      = NULL_IF_CONFIG_SMALL("MxPEG clip"),
+const FFInputFormat ff_mxg_demuxer = {
+    .p.name         = "mxg",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("MxPEG clip"),
+    .p.extensions   = "mxg",
     .priv_data_size = sizeof(MXGContext),
     .read_header    = mxg_read_header,
     .read_packet    = mxg_read_packet,
     .read_close     = mxg_close,
-    .extensions     = "mxg",
 };

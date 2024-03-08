@@ -25,7 +25,9 @@
 #include <stdlib.h>
 
 #include "libavutil/bprint.h"
+#include "libavutil/error.h"
 #include "libavutil/log.h"
+#include "libavutil/mem.h"
 
 #include "config.h"
 #include "jni.h"

@@ -28,7 +28,6 @@
 #include "hevc_ps.h"
 #include "hevc_sei.h"
 #include "h2645_parse.h"
-#include "internal.h"
 #include "parser.h"
 
 #define START_CODE 0x000001 ///< start_code_prefix_one_3bytes
@@ -78,15 +77,15 @@ static int hevc_parse_slice_header(AVCodecParserContext *s, H2645NAL *nal,
         av_log(avctx, AV_LOG_ERROR, "PPS id out of range: %d\n", pps_id);
         return AVERROR_INVALIDDATA;
     }
-    ps->pps = (HEVCPPS*)ps->pps_list[pps_id]->data;
+    ps->pps = ps->pps_list[pps_id];
 
     if (ps->pps->sps_id >= HEVC_MAX_SPS_COUNT || !ps->sps_list[ps->pps->sps_id]) {
         av_log(avctx, AV_LOG_ERROR, "SPS id out of range: %d\n", ps->pps->sps_id);
         return AVERROR_INVALIDDATA;
     }
-    if (ps->sps != (HEVCSPS*)ps->sps_list[ps->pps->sps_id]->data) {
-        ps->sps = (HEVCSPS*)ps->sps_list[ps->pps->sps_id]->data;
-        ps->vps = (HEVCVPS*)ps->vps_list[ps->sps->vps_id]->data;
+    if (ps->sps != ps->sps_list[ps->pps->sps_id]) {
+        ps->sps  = ps->sps_list[ps->pps->sps_id];
+        ps->vps  = ps->vps_list[ps->sps->vps_id];
     }
     ow  = &ps->sps->output_window;
 
@@ -279,6 +278,8 @@ static int hevc_find_frame_end(AVCodecParserContext *s, const uint8_t *buf,
             (nut >= 41 && nut <= 44) || (nut >= 48 && nut <= 55)) {
             if (pc->frame_start_found) {
                 pc->frame_start_found = 0;
+                if (!((pc->state64 >> 6 * 8) & 0xFF))
+                    return i - 6;
                 return i - 5;
             }
         } else if (nut <= HEVC_NAL_RASL_R ||
@@ -289,6 +290,8 @@ static int hevc_find_frame_end(AVCodecParserContext *s, const uint8_t *buf,
                     pc->frame_start_found = 1;
                 } else { // First slice of next frame found
                     pc->frame_start_found = 0;
+                    if (!((pc->state64 >> 6 * 8) & 0xFF))
+                        return i - 6;
                     return i - 5;
                 }
             }
@@ -336,39 +339,6 @@ static int hevc_parse(AVCodecParserContext *s, AVCodecContext *avctx,
     return next;
 }
 
-// Split after the parameter sets at the beginning of the stream if they exist.
-static int hevc_split(AVCodecContext *avctx, const uint8_t *buf, int buf_size)
-{
-    const uint8_t *ptr = buf, *end = buf + buf_size;
-    uint32_t state = -1;
-    int has_vps = 0;
-    int has_sps = 0;
-    int has_pps = 0;
-    int nut;
-
-    while (ptr < end) {
-        ptr = avpriv_find_start_code(ptr, end, &state);
-        if ((state >> 8) != START_CODE)
-            break;
-        nut = (state >> 1) & 0x3F;
-        if (nut == HEVC_NAL_VPS)
-            has_vps = 1;
-        else if (nut == HEVC_NAL_SPS)
-            has_sps = 1;
-        else if (nut == HEVC_NAL_PPS)
-            has_pps = 1;
-        else if ((nut != HEVC_NAL_SEI_PREFIX || has_pps) &&
-                  nut != HEVC_NAL_AUD) {
-            if (has_vps && has_sps) {
-                while (ptr - 4 > buf && ptr[-5] == 0)
-                    ptr--;
-                return ptr - 4 - buf;
-            }
-        }
-    }
-    return 0;
-}
-
 static void hevc_parser_close(AVCodecParserContext *s)
 {
     HEVCParserContext *ctx = s->priv_data;
@@ -380,10 +350,9 @@ static void hevc_parser_close(AVCodecParserContext *s)
     av_freep(&ctx->pc.buffer);
 }
 
-AVCodecParser ff_hevc_parser = {
+const AVCodecParser ff_hevc_parser = {
     .codec_ids      = { AV_CODEC_ID_HEVC },
     .priv_data_size = sizeof(HEVCParserContext),
     .parser_parse   = hevc_parse,
     .parser_close   = hevc_parser_close,
-    .split          = hevc_split,
 };

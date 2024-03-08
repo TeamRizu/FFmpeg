@@ -61,11 +61,11 @@ static const AVOption aphaser_options[] = {
     { "delay",    "set delay in milliseconds", OFFSET(delay),    AV_OPT_TYPE_DOUBLE, {.dbl=3.},  0,  5,   FLAGS },
     { "decay",    "set decay",                 OFFSET(decay),    AV_OPT_TYPE_DOUBLE, {.dbl=.4},  0, .99,  FLAGS },
     { "speed",    "set modulation speed",      OFFSET(speed),    AV_OPT_TYPE_DOUBLE, {.dbl=.5}, .1,  2,   FLAGS },
-    { "type",     "set modulation type",       OFFSET(type),     AV_OPT_TYPE_INT,    {.i64=WAVE_TRI}, 0, WAVE_NB-1, FLAGS, "type" },
-    { "triangular",  NULL, 0, AV_OPT_TYPE_CONST,  {.i64=WAVE_TRI}, 0, 0, FLAGS, "type" },
-    { "t",           NULL, 0, AV_OPT_TYPE_CONST,  {.i64=WAVE_TRI}, 0, 0, FLAGS, "type" },
-    { "sinusoidal",  NULL, 0, AV_OPT_TYPE_CONST,  {.i64=WAVE_SIN}, 0, 0, FLAGS, "type" },
-    { "s",           NULL, 0, AV_OPT_TYPE_CONST,  {.i64=WAVE_SIN}, 0, 0, FLAGS, "type" },
+    { "type",     "set modulation type",       OFFSET(type),     AV_OPT_TYPE_INT,    {.i64=WAVE_TRI}, 0, WAVE_NB-1, FLAGS, .unit = "type" },
+    { "triangular",  NULL, 0, AV_OPT_TYPE_CONST,  {.i64=WAVE_TRI}, 0, 0, FLAGS, .unit = "type" },
+    { "t",           NULL, 0, AV_OPT_TYPE_CONST,  {.i64=WAVE_TRI}, 0, 0, FLAGS, .unit = "type" },
+    { "sinusoidal",  NULL, 0, AV_OPT_TYPE_CONST,  {.i64=WAVE_SIN}, 0, 0, FLAGS, .unit = "type" },
+    { "s",           NULL, 0, AV_OPT_TYPE_CONST,  {.i64=WAVE_SIN}, 0, 0, FLAGS, .unit = "type" },
     { NULL }
 };
 
@@ -81,39 +81,6 @@ static av_cold int init(AVFilterContext *ctx)
         av_log(ctx, AV_LOG_WARNING, "out_gain may cause clipping\n");
 
     return 0;
-}
-
-static int query_formats(AVFilterContext *ctx)
-{
-    AVFilterFormats *formats;
-    AVFilterChannelLayouts *layouts;
-    static const enum AVSampleFormat sample_fmts[] = {
-        AV_SAMPLE_FMT_DBL, AV_SAMPLE_FMT_DBLP,
-        AV_SAMPLE_FMT_FLT, AV_SAMPLE_FMT_FLTP,
-        AV_SAMPLE_FMT_S32, AV_SAMPLE_FMT_S32P,
-        AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_S16P,
-        AV_SAMPLE_FMT_NONE
-    };
-    int ret;
-
-    layouts = ff_all_channel_counts();
-    if (!layouts)
-        return AVERROR(ENOMEM);
-    ret = ff_set_common_channel_layouts(ctx, layouts);
-    if (ret < 0)
-        return ret;
-
-    formats = ff_make_format_list(sample_fmts);
-    if (!formats)
-        return AVERROR(ENOMEM);
-    ret = ff_set_common_formats(ctx, formats);
-    if (ret < 0)
-        return ret;
-
-    formats = ff_all_samplerates();
-    if (!formats)
-        return AVERROR(ENOMEM);
-    return ff_set_common_samplerates(ctx, formats);
 }
 
 #define MOD(a, b) (((a) >= (b)) ? (a) - (b) : (a))
@@ -210,7 +177,7 @@ static int config_output(AVFilterLink *outlink)
         av_log(outlink->src, AV_LOG_ERROR, "delay is too small\n");
         return AVERROR(EINVAL);
     }
-    s->delay_buffer = av_calloc(s->delay_buffer_length, sizeof(*s->delay_buffer) * inlink->channels);
+    s->delay_buffer = av_calloc(s->delay_buffer_length, sizeof(*s->delay_buffer) * inlink->ch_layout.nb_channels);
     s->modulation_buffer_length = inlink->sample_rate / s->speed + 0.5;
     s->modulation_buffer = av_malloc_array(s->modulation_buffer_length, sizeof(*s->modulation_buffer));
 
@@ -256,7 +223,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *inbuf)
     }
 
     s->phaser(s, inbuf->extended_data, outbuf->extended_data,
-              outbuf->nb_samples, outbuf->channels);
+              outbuf->nb_samples, outbuf->ch_layout.nb_channels);
 
     if (inbuf != outbuf)
         av_frame_free(&inbuf);
@@ -278,7 +245,6 @@ static const AVFilterPad aphaser_inputs[] = {
         .type         = AVMEDIA_TYPE_AUDIO,
         .filter_frame = filter_frame,
     },
-    { NULL }
 };
 
 static const AVFilterPad aphaser_outputs[] = {
@@ -287,17 +253,19 @@ static const AVFilterPad aphaser_outputs[] = {
         .type         = AVMEDIA_TYPE_AUDIO,
         .config_props = config_output,
     },
-    { NULL }
 };
 
-AVFilter ff_af_aphaser = {
+const AVFilter ff_af_aphaser = {
     .name          = "aphaser",
     .description   = NULL_IF_CONFIG_SMALL("Add a phasing effect to the audio."),
-    .query_formats = query_formats,
     .priv_size     = sizeof(AudioPhaserContext),
     .init          = init,
     .uninit        = uninit,
-    .inputs        = aphaser_inputs,
-    .outputs       = aphaser_outputs,
+    FILTER_INPUTS(aphaser_inputs),
+    FILTER_OUTPUTS(aphaser_outputs),
+    FILTER_SAMPLEFMTS(AV_SAMPLE_FMT_DBL, AV_SAMPLE_FMT_DBLP,
+                      AV_SAMPLE_FMT_FLT, AV_SAMPLE_FMT_FLTP,
+                      AV_SAMPLE_FMT_S32, AV_SAMPLE_FMT_S32P,
+                      AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_S16P),
     .priv_class    = &aphaser_class,
 };

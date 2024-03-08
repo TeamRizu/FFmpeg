@@ -19,12 +19,16 @@
  */
 
 #include "libavutil/avassert.h"
+#include "libavutil/hwcontext.h"
 #include "libavutil/hwcontext_cuda_internal.h"
 #include "libavutil/cuda_check.h"
 #include "internal.h"
 #include "yadif.h"
 
-extern char vf_yadif_cuda_ptx[];
+#include "cuda/load_helper.h"
+
+extern const unsigned char ff_vf_yadif_cuda_ptx_data[];
+extern const unsigned int ff_vf_yadif_cuda_ptx_len;
 
 typedef struct DeintCUDAContext {
     YADIFContext yadif;
@@ -34,8 +38,6 @@ typedef struct DeintCUDAContext {
     AVBufferRef         *input_frames_ref;
     AVHWFramesContext   *input_frames;
 
-    CUcontext   cu_ctx;
-    CUstream    stream;
     CUmodule    cu_module;
     CUfunction  cu_func_uchar;
     CUfunction  cu_func_uchar2;
@@ -105,7 +107,7 @@ static CUresult call_kernel(AVFilterContext *ctx, CUfunction func,
     ret = CHECK_CU(cu->cuLaunchKernel(func,
                                       DIV_UP(dst_width, BLOCKX), DIV_UP(dst_height, BLOCKY), 1,
                                       BLOCKX, BLOCKY, 1,
-                                      0, s->stream, args, NULL));
+                                      0, s->hwctx->stream, args, NULL));
 
 exit:
     if (tex_prev)
@@ -127,7 +129,7 @@ static void filter(AVFilterContext *ctx, AVFrame *dst,
     CUcontext dummy;
     int i, ret;
 
-    ret = CHECK_CU(cu->cuCtxPushCurrent(s->cu_ctx));
+    ret = CHECK_CU(cu->cuCtxPushCurrent(s->hwctx->cuda_ctx));
     if (ret < 0)
         return;
 
@@ -189,40 +191,20 @@ static av_cold void deint_cuda_uninit(AVFilterContext *ctx)
 {
     CUcontext dummy;
     DeintCUDAContext *s = ctx->priv;
-    YADIFContext *y = &s->yadif;
 
     if (s->hwctx && s->cu_module) {
         CudaFunctions *cu = s->hwctx->internal->cuda_dl;
-        CHECK_CU(cu->cuCtxPushCurrent(s->cu_ctx));
+        CHECK_CU(cu->cuCtxPushCurrent(s->hwctx->cuda_ctx));
         CHECK_CU(cu->cuModuleUnload(s->cu_module));
         CHECK_CU(cu->cuCtxPopCurrent(&dummy));
     }
 
-    av_frame_free(&y->prev);
-    av_frame_free(&y->cur);
-    av_frame_free(&y->next);
+    ff_yadif_uninit(ctx);
 
     av_buffer_unref(&s->device_ref);
     s->hwctx = NULL;
     av_buffer_unref(&s->input_frames_ref);
     s->input_frames = NULL;
-}
-
-static int deint_cuda_query_formats(AVFilterContext *ctx)
-{
-    enum AVPixelFormat pix_fmts[] = {
-        AV_PIX_FMT_CUDA, AV_PIX_FMT_NONE,
-    };
-    int ret;
-
-    if ((ret = ff_formats_ref(ff_make_format_list(pix_fmts),
-                              &ctx->inputs[0]->outcfg.formats)) < 0)
-        return ret;
-    if ((ret = ff_formats_ref(ff_make_format_list(pix_fmts),
-                              &ctx->outputs[0]->incfg.formats)) < 0)
-        return ret;
-
-    return 0;
 }
 
 static int config_input(AVFilterLink *inlink)
@@ -265,8 +247,6 @@ static int config_output(AVFilterLink *link)
         return AVERROR(ENOMEM);
     }
     s->hwctx = ((AVHWDeviceContext*)s->device_ref->data)->hwctx;
-    s->cu_ctx = s->hwctx->cuda_ctx;
-    s->stream = s->hwctx->stream;
     cu = s->hwctx->internal->cuda_dl;
 
     link->hw_frames_ctx = av_hwframe_ctx_alloc(s->device_ref);
@@ -297,29 +277,18 @@ static int config_output(AVFilterLink *link)
         goto exit;
     }
 
-    link->time_base.num = ctx->inputs[0]->time_base.num;
-    link->time_base.den = ctx->inputs[0]->time_base.den * 2;
-    link->w             = ctx->inputs[0]->w;
-    link->h             = ctx->inputs[0]->h;
-
-    if(y->mode & 1)
-        link->frame_rate = av_mul_q(ctx->inputs[0]->frame_rate,
-                                    (AVRational){2, 1});
-
-    if (link->w < 3 || link->h < 3) {
-        av_log(ctx, AV_LOG_ERROR, "Video of less than 3 columns or lines is not supported\n");
-        ret = AVERROR(EINVAL);
+    ret = ff_yadif_config_output_common(link);
+    if (ret < 0)
         goto exit;
-    }
 
     y->csp = av_pix_fmt_desc_get(output_frames->sw_format);
     y->filter = filter;
 
-    ret = CHECK_CU(cu->cuCtxPushCurrent(s->cu_ctx));
+    ret = CHECK_CU(cu->cuCtxPushCurrent(s->hwctx->cuda_ctx));
     if (ret < 0)
         goto exit;
 
-    ret = CHECK_CU(cu->cuModuleLoadData(&s->cu_module, vf_yadif_cuda_ptx));
+    ret = ff_cuda_load_module(ctx, s->hwctx, &s->cu_module, ff_vf_yadif_cuda_ptx_data, ff_vf_yadif_cuda_ptx_len);
     if (ret < 0)
         goto exit;
 
@@ -360,7 +329,6 @@ static const AVFilterPad deint_cuda_inputs[] = {
         .filter_frame  = ff_yadif_filter_frame,
         .config_props  = config_input,
     },
-    { NULL }
 };
 
 static const AVFilterPad deint_cuda_outputs[] = {
@@ -370,18 +338,17 @@ static const AVFilterPad deint_cuda_outputs[] = {
         .request_frame = ff_yadif_request_frame,
         .config_props  = config_output,
     },
-    { NULL }
 };
 
-AVFilter ff_vf_yadif_cuda = {
+const AVFilter ff_vf_yadif_cuda = {
     .name           = "yadif_cuda",
     .description    = NULL_IF_CONFIG_SMALL("Deinterlace CUDA frames"),
     .priv_size      = sizeof(DeintCUDAContext),
     .priv_class     = &yadif_cuda_class,
     .uninit         = deint_cuda_uninit,
-    .query_formats  = deint_cuda_query_formats,
-    .inputs         = deint_cuda_inputs,
-    .outputs        = deint_cuda_outputs,
+    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
+    FILTER_INPUTS(deint_cuda_inputs),
+    FILTER_OUTPUTS(deint_cuda_outputs),
     .flags          = AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL,
     .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
 };

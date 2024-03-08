@@ -19,6 +19,7 @@
  */
 
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 
 
@@ -47,7 +48,7 @@ static int read_header(AVFormatContext *s)
 
     st->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
     st->codecpar->codec_id = AV_CODEC_ID_MPEG4;
-    st->need_parsing = AVSTREAM_PARSE_FULL;
+    ffstream(st)->need_parsing = AVSTREAM_PARSE_FULL;
     avpriv_set_pts_info(st, 64, 1, 90000);
 
     return 0;
@@ -107,11 +108,11 @@ static int read_packet(AVFormatContext *s, AVPacket *pkt)
     return 0;
 }
 
-AVInputFormat ff_iv8_demuxer = {
-    .name           = "iv8",
-    .long_name      = NULL_IF_CONFIG_SMALL("IndigoVision 8000 video"),
+const FFInputFormat ff_iv8_demuxer = {
+    .p.name         = "iv8",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("IndigoVision 8000 video"),
+    .p.flags        = AVFMT_GENERIC_INDEX,
     .read_probe     = probe,
     .read_header    = read_header,
     .read_packet    = read_packet,
-    .flags          = AVFMT_GENERIC_INDEX,
 };

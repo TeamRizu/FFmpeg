@@ -20,6 +20,7 @@
 
 #include "libavutil/opt.h"
 #include "avfilter.h"
+#include "formats.h"
 #include "internal.h"
 
 typedef struct ASetRateContext {
@@ -49,7 +50,17 @@ AVFILTER_DEFINE_CLASS(asetrate);
 static av_cold int query_formats(AVFilterContext *ctx)
 {
     ASetRateContext *sr = ctx->priv;
-    int sample_rates[] = { sr->sample_rate, -1 };
+    int ret, sample_rates[] = { sr->sample_rate, -1 };
+
+    if ((ret = ff_set_common_formats(ctx, ff_all_formats(AVMEDIA_TYPE_AUDIO))) < 0)
+        return ret;
+
+    if ((ret = ff_set_common_all_channel_counts(ctx)) < 0)
+        return ret;
+
+    if ((ret = ff_formats_ref(ff_all_samplerates(),
+                              &ctx->inputs[0]->outcfg.samplerates)) < 0)
+        return ret;
 
     return ff_formats_ref(ff_make_format_list(sample_rates),
                           &ctx->outputs[0]->incfg.samplerates);
@@ -94,7 +105,6 @@ static const AVFilterPad asetrate_inputs[] = {
         .type         = AVMEDIA_TYPE_AUDIO,
         .filter_frame = filter_frame,
     },
-    { NULL }
 };
 
 static const AVFilterPad asetrate_outputs[] = {
@@ -103,16 +113,16 @@ static const AVFilterPad asetrate_outputs[] = {
         .type         = AVMEDIA_TYPE_AUDIO,
         .config_props = config_props,
     },
-    { NULL }
 };
 
-AVFilter ff_af_asetrate = {
+const AVFilter ff_af_asetrate = {
     .name          = "asetrate",
     .description   = NULL_IF_CONFIG_SMALL("Change the sample rate without "
                                           "altering the data."),
-    .query_formats = query_formats,
     .priv_size     = sizeof(ASetRateContext),
-    .inputs        = asetrate_inputs,
-    .outputs       = asetrate_outputs,
+    FILTER_INPUTS(asetrate_inputs),
+    FILTER_OUTPUTS(asetrate_outputs),
+    FILTER_QUERY_FUNC(query_formats),
     .priv_class    = &asetrate_class,
+    .flags         = AVFILTER_FLAG_METADATA_ONLY,
 };

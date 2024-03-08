@@ -32,13 +32,13 @@
  * Dither it back to 8bit.
  */
 
+#include "libavutil/emms.h"
 #include "libavutil/imgutils.h"
 #include "libavutil/common.h"
-#include "libavutil/cpu.h"
+#include "libavutil/mem_internal.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
 #include "avfilter.h"
-#include "formats.h"
 #include "gradfun.h"
 #include "internal.h"
 #include "video.h"
@@ -92,7 +92,7 @@ static void filter(GradFunContext *ctx, uint8_t *dst, const uint8_t *src, int wi
     for (y = 0; y < r; y++)
         ctx->blur_line(dc, buf + y * bstride, buf + (y - 1) * bstride, src + 2 * y * src_linesize, src_linesize, width / 2);
     for (;;) {
-        if (y < height - r) {
+        if (y + 1 < height - r) {
             int mod = ((y + r) / 2) % r;
             uint16_t *buf0 = buf + mod * bstride;
             uint16_t *buf1 = buf + (mod ? mod - 1 : r - 1) * bstride;
@@ -131,8 +131,9 @@ static av_cold int init(AVFilterContext *ctx)
     s->blur_line   = ff_gradfun_blur_line_c;
     s->filter_line = ff_gradfun_filter_line_c;
 
-    if (ARCH_X86)
-        ff_gradfun_init_x86(s);
+#if ARCH_X86
+    ff_gradfun_init_x86(s);
+#endif
 
     av_log(ctx, AV_LOG_VERBOSE, "threshold:%.2f radius:%d\n", s->strength, s->radius);
 
@@ -145,21 +146,14 @@ static av_cold void uninit(AVFilterContext *ctx)
     av_freep(&s->buf);
 }
 
-static int query_formats(AVFilterContext *ctx)
-{
-    static const enum AVPixelFormat pix_fmts[] = {
-        AV_PIX_FMT_YUV410P,            AV_PIX_FMT_YUV420P,
-        AV_PIX_FMT_GRAY8,              AV_PIX_FMT_YUV444P,
-        AV_PIX_FMT_YUV422P,            AV_PIX_FMT_YUV411P,
-        AV_PIX_FMT_YUV440P,
-        AV_PIX_FMT_GBRP,
-        AV_PIX_FMT_NONE
-    };
-    AVFilterFormats *fmts_list = ff_make_format_list(pix_fmts);
-    if (!fmts_list)
-        return AVERROR(ENOMEM);
-    return ff_set_common_formats(ctx, fmts_list);
-}
+static const enum AVPixelFormat pix_fmts[] = {
+    AV_PIX_FMT_YUV410P,            AV_PIX_FMT_YUV420P,
+    AV_PIX_FMT_GRAY8,              AV_PIX_FMT_YUV444P,
+    AV_PIX_FMT_YUV422P,            AV_PIX_FMT_YUV411P,
+    AV_PIX_FMT_YUV440P,
+    AV_PIX_FMT_GBRP,
+    AV_PIX_FMT_NONE
+};
 
 static int config_input(AVFilterLink *inlink)
 {
@@ -240,26 +234,17 @@ static const AVFilterPad avfilter_vf_gradfun_inputs[] = {
         .config_props = config_input,
         .filter_frame = filter_frame,
     },
-    { NULL }
 };
 
-static const AVFilterPad avfilter_vf_gradfun_outputs[] = {
-    {
-        .name = "default",
-        .type = AVMEDIA_TYPE_VIDEO,
-    },
-    { NULL }
-};
-
-AVFilter ff_vf_gradfun = {
+const AVFilter ff_vf_gradfun = {
     .name          = "gradfun",
     .description   = NULL_IF_CONFIG_SMALL("Debands video quickly using gradients."),
     .priv_size     = sizeof(GradFunContext),
     .priv_class    = &gradfun_class,
     .init          = init,
     .uninit        = uninit,
-    .query_formats = query_formats,
-    .inputs        = avfilter_vf_gradfun_inputs,
-    .outputs       = avfilter_vf_gradfun_outputs,
+    FILTER_INPUTS(avfilter_vf_gradfun_inputs),
+    FILTER_OUTPUTS(ff_video_default_filterpad),
+    FILTER_PIXFMTS_ARRAY(pix_fmts),
     .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC,
 };

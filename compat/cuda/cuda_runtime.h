@@ -1,7 +1,7 @@
 /*
  * Minimum CUDA compatibility definitions header
  *
- * Copyright (c) 2019 Rodger Combs
+ * Copyright (c) 2019 rcombs
  *
  * This file is part of FFmpeg.
  *
@@ -73,7 +73,7 @@ typedef struct __device_builtin__ __align__(4) uchar4
 
 typedef struct __device_builtin__ __align__(8) ushort4
 {
-    unsigned char x, y, z, w;
+    unsigned short x, y, z, w;
 } ushort4;
 
 typedef struct __device_builtin__ __align__(16) int4
@@ -181,8 +181,12 @@ static inline __device__ double trunc(double a) { return __builtin_trunc(a); }
 static inline __device__ float fabsf(float a) { return __builtin_fabsf(a); }
 static inline __device__ float fabs(float a) { return __builtin_fabsf(a); }
 static inline __device__ double fabs(double a) { return __builtin_fabs(a); }
+static inline __device__ float sqrtf(float a) { return __builtin_sqrtf(a); }
 
+static inline __device__ float __saturatef(float a) { return __nvvm_saturate_f(a); }
 static inline __device__ float __sinf(float a) { return __nvvm_sin_approx_f(a); }
 static inline __device__ float __cosf(float a) { return __nvvm_cos_approx_f(a); }
+static inline __device__ float __expf(float a) { return __nvvm_ex2_approx_f(a * (float)__builtin_log2(__builtin_exp(1))); }
+static inline __device__ float __powf(float a, float b) { return __nvvm_ex2_approx_f(__nvvm_lg2_approx_f(a) * b); }
 
 #endif /* COMPAT_CUDA_CUDA_RUNTIME_H */

@@ -31,6 +31,7 @@ typedef void ID3D11Device;
 #include <ffnvcodec/nvEncodeAPI.h>
 
 #include "compat/cuda/dynlink_loader.h"
+#include "libavutil/buffer.h"
 #include "libavutil/fifo.h"
 #include "libavutil/opt.h"
 #include "hwconfig.h"
@@ -68,6 +69,18 @@ typedef void ID3D11Device;
 #define NVENC_HAVE_MULTIPASS
 #define NVENC_HAVE_LDKFS
 #define NVENC_HAVE_H264_LVL6
+#define NVENC_HAVE_HEVC_CONSTRAINED_ENCODING
+#endif
+
+// SDK 11.1 compile time feature checks
+#if NVENCAPI_CHECK_VERSION(11, 1)
+#define NVENC_HAVE_QP_CHROMA_OFFSETS
+#define NVENC_HAVE_SINGLE_SLICE_INTRA_REFRESH
+#endif
+
+// SDK 12.1 compile time feature checks
+#if NVENCAPI_CHECK_VERSION(12, 1)
+#define NVENC_NO_DEPRECATED_RC
 #endif
 
 typedef struct NvencSurface
@@ -82,6 +95,14 @@ typedef struct NvencSurface
     NV_ENC_OUTPUT_PTR output_surface;
     NV_ENC_BUFFER_FORMAT format;
 } NvencSurface;
+
+typedef struct NvencFrameData
+{
+    int64_t duration;
+
+    void        *frame_opaque;
+    AVBufferRef *frame_opaque_ref;
+} NvencFrameData;
 
 typedef struct NvencDynLoadFunctions
 {
@@ -103,7 +124,7 @@ enum {
     PRESET_LOW_LATENCY_DEFAULT ,
     PRESET_LOW_LATENCY_HQ ,
     PRESET_LOW_LATENCY_HP,
-    PRESET_LOSSLESS_DEFAULT, // lossless presets must be the last ones
+    PRESET_LOSSLESS_DEFAULT,
     PRESET_LOSSLESS_HP,
 #ifdef NVENC_HAVE_NEW_PRESETS
     PRESET_P1,
@@ -143,6 +164,12 @@ enum {
     ANY_DEVICE,
 };
 
+enum {
+    NVENC_RGB_MODE_DISABLED,
+    NVENC_RGB_MODE_420,
+    NVENC_RGB_MODE_444,
+};
+
 typedef struct NvencContext
 {
     AVClass *avclass;
@@ -161,10 +188,17 @@ typedef struct NvencContext
     int nb_surfaces;
     NvencSurface *surfaces;
 
-    AVFifoBuffer *unused_surface_queue;
-    AVFifoBuffer *output_surface_queue;
-    AVFifoBuffer *output_surface_ready_queue;
-    AVFifoBuffer *timestamp_list;
+    NvencFrameData *frame_data_array;
+    int frame_data_array_nb;
+    int frame_data_array_pos;
+
+    AVFifo *unused_surface_queue;
+    AVFifo *output_surface_queue;
+    AVFifo *output_surface_ready_queue;
+    AVFifo *timestamp_list;
+
+    NV_ENC_SEI_PAYLOAD *sei_data;
+    int sei_data_size;
 
     struct {
         void *ptr;
@@ -189,6 +223,8 @@ typedef struct NvencContext
     int tier;
     int rc;
     int cbr;
+    int tile_rows;
+    int tile_cols;
     int twopass;
     int device;
     int flags;
@@ -210,6 +246,8 @@ typedef struct NvencContext
     int init_qp_b;
     int init_qp_i;
     int cqp;
+    int qp_cb_offset;
+    int qp_cr_offset;
     int weighted_pred;
     int coder;
     int b_ref_mode;
@@ -219,6 +257,15 @@ typedef struct NvencContext
     int tuning_info;
     int multipass;
     int ldkfs;
+    int extra_sei;
+    int intra_refresh;
+    int single_slice_intra_refresh;
+    int constrained_encoding;
+    int udu_sei;
+    int timing_info;
+    int highbitdepth;
+    int max_slice_size;
+    int rgb_mode;
 } NvencContext;
 
 int ff_nvenc_encode_init(AVCodecContext *avctx);

@@ -18,14 +18,11 @@
 
 #include <string.h>
 
-#include "libavutil/avassert.h"
 #include "libavutil/common.h"
-#include "libavutil/mem.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
 
 #include "avfilter.h"
-#include "formats.h"
 #include "internal.h"
 #include "video.h"
 #include "vaapi_vpp.h"
@@ -48,6 +45,9 @@ typedef struct DeintVAAPIContext {
     int                queue_count;
     AVFrame           *frame_queue[MAX_REFERENCES];
     int                extra_delay_for_timestamps;
+
+    int                eof;
+    int                prev_pts;
 } DeintVAAPIContext;
 
 static const char *deint_vaapi_mode_name(int mode)
@@ -190,9 +190,11 @@ static int deint_vaapi_filter_frame(AVFilterLink *inlink, AVFrame *input_frame)
     void *filter_params_addr = NULL;
     int err, i, field, current_frame_index;
 
-    av_log(avctx, AV_LOG_DEBUG, "Filter input: %s, %ux%u (%"PRId64").\n",
-           av_get_pix_fmt_name(input_frame->format),
-           input_frame->width, input_frame->height, input_frame->pts);
+    // NULL frame is used to flush the queue in field mode
+    if (input_frame)
+        av_log(avctx, AV_LOG_DEBUG, "Filter input: %s, %ux%u (%"PRId64").\n",
+            av_get_pix_fmt_name(input_frame->format),
+            input_frame->width, input_frame->height, input_frame->pts);
 
     if (ctx->queue_count < ctx->queue_depth) {
         ctx->frame_queue[ctx->queue_count++] = input_frame;
@@ -210,6 +212,9 @@ static int deint_vaapi_filter_frame(AVFilterLink *inlink, AVFrame *input_frame)
     current_frame_index = ctx->pipeline_caps.num_forward_references;
 
     input_frame = ctx->frame_queue[current_frame_index];
+    if (!input_frame)
+        return 0;
+
     input_surface = (VASurfaceID)(uintptr_t)input_frame->data[3];
     for (i = 0; i < ctx->pipeline_caps.num_forward_references; i++)
         forward_references[i] = (VASurfaceID)(uintptr_t)
@@ -246,7 +251,7 @@ static int deint_vaapi_filter_frame(AVFilterLink *inlink, AVFrame *input_frame)
         if (err < 0)
             goto fail;
 
-        if (!ctx->auto_enable || input_frame->interlaced_frame) {
+        if (!ctx->auto_enable || (input_frame->flags & AV_FRAME_FLAG_INTERLACED)) {
             vas = vaMapBuffer(vpp_ctx->hwctx->display, vpp_ctx->filter_buffers[0],
                               &filter_params_addr);
             if (vas != VA_STATUS_SUCCESS) {
@@ -257,7 +262,7 @@ static int deint_vaapi_filter_frame(AVFilterLink *inlink, AVFrame *input_frame)
             }
             filter_params = filter_params_addr;
             filter_params->flags = 0;
-            if (input_frame->top_field_first) {
+            if (input_frame->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST) {
                 filter_params->flags |= field ? VA_DEINTERLACING_BOTTOM_FIELD : 0;
             } else {
                 filter_params->flags |= VA_DEINTERLACING_BOTTOM_FIELD_FIRST;
@@ -291,11 +296,18 @@ static int deint_vaapi_filter_frame(AVFilterLink *inlink, AVFrame *input_frame)
         if (ctx->field_rate == 2) {
             if (field == 0)
                 output_frame->pts = 2 * input_frame->pts;
+            else if (ctx->eof)
+                output_frame->pts = 3 * input_frame->pts - ctx->prev_pts;
             else
                 output_frame->pts = input_frame->pts +
                     ctx->frame_queue[current_frame_index + 1]->pts;
         }
+#if FF_API_INTERLACED_FRAME
+FF_DISABLE_DEPRECATION_WARNINGS
         output_frame->interlaced_frame = 0;
+FF_ENABLE_DEPRECATION_WARNINGS
+#endif
+        output_frame->flags &= ~AV_FRAME_FLAG_INTERLACED;
 
         av_log(avctx, AV_LOG_DEBUG, "Filter output: %s, %ux%u (%"PRId64").\n",
                av_get_pix_fmt_name(output_frame->format),
@@ -306,6 +318,8 @@ static int deint_vaapi_filter_frame(AVFilterLink *inlink, AVFrame *input_frame)
             break;
     }
 
+    ctx->prev_pts = input_frame->pts;
+
     return err;
 
 fail:
@@ -313,6 +327,25 @@ fail:
         vaUnmapBuffer(vpp_ctx->hwctx->display, vpp_ctx->filter_buffers[0]);
     av_frame_free(&output_frame);
     return err;
+}
+
+static int deint_vaapi_request_frame(AVFilterLink *link)
+{
+    AVFilterContext *avctx = link->src;
+    DeintVAAPIContext *ctx   = avctx->priv;
+    int ret;
+
+    if (ctx->eof)
+        return AVERROR_EOF;
+
+    ret = ff_request_frame(link->src->inputs[0]);
+    if (ret == AVERROR_EOF && ctx->extra_delay_for_timestamps) {
+        ctx->eof = 1;
+        deint_vaapi_filter_frame(link->src->inputs[0], NULL);
+    } else if (ret < 0)
+        return ret;
+
+    return 0;
 }
 
 static av_cold int deint_vaapi_init(AVFilterContext *avctx)
@@ -332,24 +365,24 @@ static av_cold int deint_vaapi_init(AVFilterContext *avctx)
 static const AVOption deint_vaapi_options[] = {
     { "mode", "Deinterlacing mode",
       OFFSET(mode), AV_OPT_TYPE_INT, { .i64 = VAProcDeinterlacingNone },
-      VAProcDeinterlacingNone, VAProcDeinterlacingCount - 1, FLAGS, "mode" },
+      VAProcDeinterlacingNone, VAProcDeinterlacingCount - 1, FLAGS, .unit = "mode" },
     { "default", "Use the highest-numbered (and therefore possibly most advanced) deinterlacing algorithm",
-      0, AV_OPT_TYPE_CONST, { .i64 = VAProcDeinterlacingNone }, 0, 0, FLAGS, "mode" },
+      0, AV_OPT_TYPE_CONST, { .i64 = VAProcDeinterlacingNone }, 0, 0, FLAGS, .unit = "mode" },
     { "bob", "Use the bob deinterlacing algorithm",
-      0, AV_OPT_TYPE_CONST, { .i64 = VAProcDeinterlacingBob }, 0, 0, FLAGS, "mode" },
+      0, AV_OPT_TYPE_CONST, { .i64 = VAProcDeinterlacingBob }, 0, 0, FLAGS, .unit = "mode" },
     { "weave", "Use the weave deinterlacing algorithm",
-      0, AV_OPT_TYPE_CONST, { .i64 = VAProcDeinterlacingWeave }, 0, 0, FLAGS,  "mode" },
+      0, AV_OPT_TYPE_CONST, { .i64 = VAProcDeinterlacingWeave }, 0, 0, FLAGS,  .unit = "mode" },
     { "motion_adaptive", "Use the motion adaptive deinterlacing algorithm",
-      0, AV_OPT_TYPE_CONST, { .i64 = VAProcDeinterlacingMotionAdaptive }, 0, 0, FLAGS, "mode" },
+      0, AV_OPT_TYPE_CONST, { .i64 = VAProcDeinterlacingMotionAdaptive }, 0, 0, FLAGS, .unit = "mode" },
     { "motion_compensated", "Use the motion compensated deinterlacing algorithm",
-      0, AV_OPT_TYPE_CONST, { .i64 = VAProcDeinterlacingMotionCompensated }, 0, 0, FLAGS, "mode" },
+      0, AV_OPT_TYPE_CONST, { .i64 = VAProcDeinterlacingMotionCompensated }, 0, 0, FLAGS, .unit = "mode" },
 
     { "rate", "Generate output at frame rate or field rate",
-      OFFSET(field_rate), AV_OPT_TYPE_INT, { .i64 = 1 }, 1, 2, FLAGS, "rate" },
+      OFFSET(field_rate), AV_OPT_TYPE_INT, { .i64 = 1 }, 1, 2, FLAGS, .unit = "rate" },
     { "frame", "Output at frame rate (one frame of output for each field-pair)",
-      0, AV_OPT_TYPE_CONST, { .i64 = 1 }, 0, 0, FLAGS, "rate" },
+      0, AV_OPT_TYPE_CONST, { .i64 = 1 }, 0, 0, FLAGS, .unit = "rate" },
     { "field", "Output at field rate (one frame of output for each field)",
-      0, AV_OPT_TYPE_CONST, { .i64 = 2 }, 0, 0, FLAGS, "rate" },
+      0, AV_OPT_TYPE_CONST, { .i64 = 2 }, 0, 0, FLAGS, .unit = "rate" },
 
     { "auto", "Only deinterlace fields, passing frames through unchanged",
       OFFSET(auto_enable), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 1, FLAGS },
@@ -371,27 +404,26 @@ static const AVFilterPad deint_vaapi_inputs[] = {
         .filter_frame = &deint_vaapi_filter_frame,
         .config_props = &ff_vaapi_vpp_config_input,
     },
-    { NULL }
 };
 
 static const AVFilterPad deint_vaapi_outputs[] = {
     {
-        .name = "default",
-        .type = AVMEDIA_TYPE_VIDEO,
-        .config_props = &deint_vaapi_config_output,
+        .name           = "default",
+        .type           = AVMEDIA_TYPE_VIDEO,
+        .request_frame  = &deint_vaapi_request_frame,
+        .config_props   = &deint_vaapi_config_output,
     },
-    { NULL }
 };
 
-AVFilter ff_vf_deinterlace_vaapi = {
+const AVFilter ff_vf_deinterlace_vaapi = {
     .name           = "deinterlace_vaapi",
     .description    = NULL_IF_CONFIG_SMALL("Deinterlacing of VAAPI surfaces"),
     .priv_size      = sizeof(DeintVAAPIContext),
     .init           = &deint_vaapi_init,
     .uninit         = &ff_vaapi_vpp_ctx_uninit,
-    .query_formats  = &ff_vaapi_vpp_query_formats,
-    .inputs         = deint_vaapi_inputs,
-    .outputs        = deint_vaapi_outputs,
+    FILTER_INPUTS(deint_vaapi_inputs),
+    FILTER_OUTPUTS(deint_vaapi_outputs),
+    FILTER_QUERY_FUNC(&ff_vaapi_vpp_query_formats),
     .priv_class     = &deint_vaapi_class,
     .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
 };

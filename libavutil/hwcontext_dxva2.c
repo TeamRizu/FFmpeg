@@ -57,6 +57,11 @@ typedef struct DXVA2Mapping {
 } DXVA2Mapping;
 
 typedef struct DXVA2FramesContext {
+    /**
+     * The public AVDXVA2FramesContext. See hwcontext_dxva2.h for it.
+     */
+    AVDXVA2FramesContext p;
+
     IDirect3DSurface9 **surfaces_internal;
     int              nb_surfaces_used;
 
@@ -82,7 +87,15 @@ static const struct {
 } supported_formats[] = {
     { MKTAG('N', 'V', '1', '2'), AV_PIX_FMT_NV12 },
     { MKTAG('P', '0', '1', '0'), AV_PIX_FMT_P010 },
+    { MKTAG('A', 'Y', 'U', 'V'), AV_PIX_FMT_VUYX },
+    { MKTAG('Y', 'U', 'Y', '2'), AV_PIX_FMT_YUYV422 },
+    { MKTAG('Y', '2', '1', '0'), AV_PIX_FMT_Y210 },
+    { MKTAG('Y', '4', '1', '0'), AV_PIX_FMT_XV30 },
+    { MKTAG('P', '0', '1', '6'), AV_PIX_FMT_P012 },
+    { MKTAG('Y', '2', '1', '6'), AV_PIX_FMT_Y212 },
+    { MKTAG('Y', '4', '1', '6'), AV_PIX_FMT_XV36 },
     { D3DFMT_P8,                 AV_PIX_FMT_PAL8 },
+    { D3DFMT_A8R8G8B8,           AV_PIX_FMT_BGRA },
 };
 
 DEFINE_GUID(video_decoder_service,   0xfc51a551, 0xd5e7, 0x11d9, 0xaf, 0x55, 0x00, 0x05, 0x4e, 0x43, 0xff, 0x02);
@@ -91,8 +104,8 @@ DEFINE_GUID(video_processor_service, 0xfc51a552, 0xd5e7, 0x11d9, 0xaf, 0x55, 0x0
 static void dxva2_frames_uninit(AVHWFramesContext *ctx)
 {
     AVDXVA2DeviceContext *device_hwctx = ctx->device_ctx->hwctx;
-    AVDXVA2FramesContext *frames_hwctx = ctx->hwctx;
-    DXVA2FramesContext *s = ctx->internal->priv;
+    DXVA2FramesContext              *s = ctx->hwctx;
+    AVDXVA2FramesContext *frames_hwctx = &s->p;
     int i;
 
     if (frames_hwctx->decoder_to_release)
@@ -124,11 +137,11 @@ static void dxva2_pool_release_dummy(void *opaque, uint8_t *data)
     // released in dxva2_frames_uninit()
 }
 
-static AVBufferRef *dxva2_pool_alloc(void *opaque, int size)
+static AVBufferRef *dxva2_pool_alloc(void *opaque, size_t size)
 {
     AVHWFramesContext      *ctx = (AVHWFramesContext*)opaque;
-    DXVA2FramesContext       *s = ctx->internal->priv;
-    AVDXVA2FramesContext *hwctx = ctx->hwctx;
+    DXVA2FramesContext       *s = ctx->hwctx;
+    AVDXVA2FramesContext *hwctx = &s->p;
 
     if (s->nb_surfaces_used < hwctx->nb_surfaces) {
         s->nb_surfaces_used++;
@@ -141,9 +154,9 @@ static AVBufferRef *dxva2_pool_alloc(void *opaque, int size)
 
 static int dxva2_init_pool(AVHWFramesContext *ctx)
 {
-    AVDXVA2FramesContext *frames_hwctx = ctx->hwctx;
     AVDXVA2DeviceContext *device_hwctx = ctx->device_ctx->hwctx;
-    DXVA2FramesContext              *s = ctx->internal->priv;
+    DXVA2FramesContext              *s = ctx->hwctx;
+    AVDXVA2FramesContext *frames_hwctx = &s->p;
     int decode = (frames_hwctx->surface_type == DXVA2_VideoDecoderRenderTarget);
 
     int i;
@@ -179,8 +192,8 @@ static int dxva2_init_pool(AVHWFramesContext *ctx)
         return AVERROR(EINVAL);
     }
 
-    s->surfaces_internal = av_mallocz_array(ctx->initial_pool_size,
-                                            sizeof(*s->surfaces_internal));
+    s->surfaces_internal = av_calloc(ctx->initial_pool_size,
+                                     sizeof(*s->surfaces_internal));
     if (!s->surfaces_internal)
         return AVERROR(ENOMEM);
 
@@ -195,9 +208,10 @@ static int dxva2_init_pool(AVHWFramesContext *ctx)
         return AVERROR_UNKNOWN;
     }
 
-    ctx->internal->pool_internal = av_buffer_pool_init2(sizeof(*s->surfaces_internal),
-                                                        ctx, dxva2_pool_alloc, NULL);
-    if (!ctx->internal->pool_internal)
+    ffhwframesctx(ctx)->pool_internal =
+        av_buffer_pool_init2(sizeof(*s->surfaces_internal),
+                             ctx, dxva2_pool_alloc, NULL);
+    if (!ffhwframesctx(ctx)->pool_internal)
         return AVERROR(ENOMEM);
 
     frames_hwctx->surfaces    = s->surfaces_internal;
@@ -208,8 +222,8 @@ static int dxva2_init_pool(AVHWFramesContext *ctx)
 
 static int dxva2_frames_init(AVHWFramesContext *ctx)
 {
-    AVDXVA2FramesContext *hwctx = ctx->hwctx;
-    DXVA2FramesContext       *s = ctx->internal->priv;
+    DXVA2FramesContext       *s = ctx->hwctx;
+    AVDXVA2FramesContext *hwctx = &s->p;
     int ret;
 
     if (hwctx->surface_type != DXVA2_VideoDecoderRenderTarget &&
@@ -348,8 +362,8 @@ static int dxva2_transfer_data_to(AVHWFramesContext *ctx, AVFrame *dst,
     if (ret < 0)
         goto fail;
 
-    av_image_copy(map->data, map->linesize, (const uint8_t **)src->data, src->linesize,
-                  ctx->sw_format, src->width, src->height);
+    av_image_copy2(map->data, map->linesize, src->data, src->linesize,
+                   ctx->sw_format, src->width, src->height);
 
 fail:
     av_frame_free(&map);
@@ -578,8 +592,7 @@ const HWContextType ff_hwcontext_type_dxva2 = {
     .name                 = "DXVA2",
 
     .device_hwctx_size    = sizeof(AVDXVA2DeviceContext),
-    .frames_hwctx_size    = sizeof(AVDXVA2FramesContext),
-    .frames_priv_size     = sizeof(DXVA2FramesContext),
+    .frames_hwctx_size    = sizeof(DXVA2FramesContext),
 
     .device_create        = dxva2_device_create,
     .frames_init          = dxva2_frames_init,

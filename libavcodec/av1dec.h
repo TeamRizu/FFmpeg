@@ -24,28 +24,32 @@
 #include <stdint.h>
 
 #include "libavutil/buffer.h"
+#include "libavutil/fifo.h"
+#include "libavutil/frame.h"
 #include "libavutil/pixfmt.h"
 #include "avcodec.h"
+#include "packet.h"
 #include "cbs.h"
 #include "cbs_av1.h"
-#include "thread.h"
 
 typedef struct AV1Frame {
-    ThreadFrame tf;
+    AVFrame *f;
 
-    AVBufferRef *hwaccel_priv_buf;
-    void *hwaccel_picture_private;
+    void *hwaccel_picture_private; ///< RefStruct reference
 
-    AVBufferRef *header_ref;
+    AV1RawOBU *header_ref; ///< RefStruct reference backing raw_frame_header.
     AV1RawFrameHeader *raw_frame_header;
 
     int temporal_id;
     int spatial_id;
 
+    uint8_t gm_invalid[AV1_NUM_REF_FRAMES];
     uint8_t gm_type[AV1_NUM_REF_FRAMES];
     int32_t gm_params[AV1_NUM_REF_FRAMES][6];
 
     uint8_t skip_mode_frame_idx[2];
+
+    AV1RawFilmGrainParams film_grain;
 
     uint8_t coded_lossless;
 } AV1Frame;
@@ -64,19 +68,34 @@ typedef struct AV1DecContext {
     enum AVPixelFormat pix_fmt;
     CodedBitstreamContext *cbc;
     CodedBitstreamFragment current_obu;
+    AVPacket *pkt;
 
-    AVBufferRef *seq_ref;
+    AVBufferRef *seq_data_ref;
+    AV1RawOBU *seq_ref;    ///< RefStruct reference backing raw_seq
     AV1RawSequenceHeader *raw_seq;
-    AVBufferRef *header_ref;
+    AV1RawOBU *header_ref; ///< RefStruct reference backing raw_frame_header
     AV1RawFrameHeader *raw_frame_header;
     TileGroupInfo *tile_group_info;
+
+    AV1RawOBU *cll_ref;    ///< RefStruct reference backing cll
+    AV1RawMetadataHDRCLL *cll;
+    AV1RawOBU *mdcv_ref;   ///< RefStruct reference backing mdcv
+    AV1RawMetadataHDRMDCV *mdcv;
+    AVFifo *itut_t35_fifo;
+
     uint16_t tile_num;
     uint16_t tg_start;
     uint16_t tg_end;
 
+    int operating_point_idc;
+
     AV1Frame ref[AV1_NUM_REF_FRAMES];
     AV1Frame cur_frame;
 
+    int nb_unit;
+
+    // AVOptions
+    int operating_point;
 } AV1DecContext;
 
 #endif /* AVCODEC_AV1DEC_H */

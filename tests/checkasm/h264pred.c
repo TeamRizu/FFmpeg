@@ -20,11 +20,12 @@
 
 #include <string.h>
 #include "checkasm.h"
-#include "libavcodec/avcodec.h"
+#include "libavcodec/codec_id.h"
 #include "libavcodec/h264pred.h"
 #include "libavutil/common.h"
 #include "libavutil/internal.h"
 #include "libavutil/intreadwrite.h"
+#include "libavutil/mem_internal.h"
 
 static const int codec_ids[4] = { AV_CODEC_ID_H264, AV_CODEC_ID_VP8, AV_CODEC_ID_RV40, AV_CODEC_ID_SVQ3 };
 

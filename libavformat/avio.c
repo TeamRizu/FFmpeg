@@ -24,13 +24,15 @@
 #include "libavutil/opt.h"
 #include "libavutil/time.h"
 #include "libavutil/avassert.h"
+#include "avio_internal.h"
 #include "os_support.h"
-#include "avformat.h"
 #include "internal.h"
 #if CONFIG_NETWORK
 #include "network.h"
 #endif
 #include "url.h"
+
+#define IO_BUFFER_SIZE 32768
 
 /** @name Logging context. */
 /*@{*/
@@ -61,18 +63,56 @@ static const AVOption options[] = {
     { NULL }
 };
 
-const AVClass ffurl_context_class = {
+static const AVClass url_context_class = {
     .class_name       = "URLContext",
     .item_name        = urlcontext_to_name,
     .option           = options,
     .version          = LIBAVUTIL_VERSION_INT,
     .child_next       = urlcontext_child_next,
-#if FF_API_CHILD_CLASS_NEXT
-    .child_class_next = ff_urlcontext_child_class_next,
-#endif
     .child_class_iterate = ff_urlcontext_child_class_iterate,
 };
 /*@}*/
+
+static void *avio_child_next(void *obj, void *prev)
+{
+    AVIOContext *s = obj;
+    return prev ? NULL : s->opaque;
+}
+
+static const AVClass *child_class_iterate(void **iter)
+{
+    const AVClass *c = *iter ? NULL : &url_context_class;
+    *iter = (void*)(uintptr_t)c;
+    return c;
+}
+
+#define AVIOOFFSET(x) offsetof(AVIOContext,x)
+#define E AV_OPT_FLAG_ENCODING_PARAM
+#define D AV_OPT_FLAG_DECODING_PARAM
+static const AVOption avio_options[] = {
+    {"protocol_whitelist", "List of protocols that are allowed to be used", AVIOOFFSET(protocol_whitelist), AV_OPT_TYPE_STRING, { .str = NULL },  0, 0, D },
+    { NULL },
+};
+
+const AVClass ff_avio_class = {
+    .class_name = "AVIOContext",
+    .item_name  = av_default_item_name,
+    .version    = LIBAVUTIL_VERSION_INT,
+    .option     = avio_options,
+    .child_next = avio_child_next,
+    .child_class_iterate = child_class_iterate,
+};
+
+URLContext *ffio_geturlcontext(AVIOContext *s)
+{
+    if (!s)
+        return NULL;
+
+    if (s->opaque && s->read_packet == ffurl_read2)
+        return s->opaque;
+    else
+        return NULL;
+}
 
 static int url_alloc_for_protocol(URLContext **puc, const URLProtocol *up,
                                   const char *filename, int flags,
@@ -100,7 +140,7 @@ static int url_alloc_for_protocol(URLContext **puc, const URLProtocol *up,
         err = AVERROR(ENOMEM);
         goto fail;
     }
-    uc->av_class = &ffurl_context_class;
+    uc->av_class = &url_context_class;
     uc->filename = (char *)&uc[1];
     strcpy(uc->filename, filename);
     uc->prot            = up;
@@ -114,11 +154,10 @@ static int url_alloc_for_protocol(URLContext **puc, const URLProtocol *up,
             goto fail;
         }
         if (up->priv_data_class) {
-            int proto_len= strlen(up->name);
-            char *start = strchr(uc->filename, ',');
+            char *start;
             *(const AVClass **)uc->priv_data = up->priv_data_class;
             av_opt_set_defaults(uc->priv_data);
-            if(!strncmp(up->name, uc->filename, proto_len) && uc->filename + proto_len == start){
+            if (av_strstart(uc->filename, up->name, (const char**)&start) && *start == ',') {
                 int ret= 0;
                 char *p= start;
                 char sep= *++p;
@@ -130,10 +169,7 @@ static int url_alloc_for_protocol(URLContext **puc, const URLProtocol *up,
 
                 while(ret >= 0 && (key= strchr(p, sep)) && p<key && (val = strchr(key+1, sep))){
                     *val= *key= 0;
-                    if (strcmp(p, "start") && strcmp(p, "end")) {
-                        ret = AVERROR_OPTION_NOT_FOUND;
-                    } else
-                        ret= av_opt_set(uc->priv_data, p, key+1, 0);
+                    ret = av_opt_set(uc->priv_data, p, key+1, 0);
                     if (ret == AVERROR_OPTION_NOT_FOUND)
                         av_log(uc, AV_LOG_ERROR, "Key '%s' not found.\n", p);
                     *val= *key= sep;
@@ -141,8 +177,6 @@ static int url_alloc_for_protocol(URLContext **puc, const URLProtocol *up,
                 }
                 if(ret<0 || p!=key){
                     av_log(uc, AV_LOG_ERROR, "Error parsing options string %s\n", start);
-                    av_freep(&uc->priv_data);
-                    av_freep(&uc);
                     err = AVERROR(EINVAL);
                     goto fail;
                 }
@@ -235,6 +269,17 @@ int ffurl_accept(URLContext *s, URLContext **c)
     return AVERROR(EBADF);
 }
 
+int avio_accept(AVIOContext *s, AVIOContext **c)
+{
+    int ret;
+    URLContext *sc = s->opaque;
+    URLContext *cc = NULL;
+    ret = ffurl_accept(sc, &cc);
+    if (ret < 0)
+        return ret;
+    return ffio_fdopen(c, cc);
+}
+
 int ffurl_handshake(URLContext *c)
 {
     int ret;
@@ -245,6 +290,12 @@ int ffurl_handshake(URLContext *c)
     }
     c->is_connected = 1;
     return 0;
+}
+
+int avio_handshake(AVIOContext *c)
+{
+    URLContext *cc = c->opaque;
+    return ffurl_handshake(cc);
 }
 
 #define URL_SCHEME_CHARS                        \
@@ -317,8 +368,11 @@ int ffurl_open_whitelist(URLContext **puc, const char *filename, int flags,
     int ret = ffurl_alloc(puc, filename, flags, int_cb);
     if (ret < 0)
         return ret;
-    if (parent)
-        av_opt_copy(*puc, parent);
+    if (parent) {
+        ret = av_opt_copy(*puc, parent);
+        if (ret < 0)
+            goto fail;
+    }
     if (options &&
         (ret = av_opt_set_dict(*puc, options)) < 0)
         goto fail;
@@ -354,18 +408,101 @@ fail:
     return ret;
 }
 
-int ffurl_open(URLContext **puc, const char *filename, int flags,
-               const AVIOInterruptCB *int_cb, AVDictionary **options)
+int ffio_fdopen(AVIOContext **sp, URLContext *h)
 {
-    return ffurl_open_whitelist(puc, filename, flags,
-                                int_cb, options, NULL, NULL, NULL);
+    AVIOContext *s;
+    uint8_t *buffer = NULL;
+    int buffer_size, max_packet_size;
+
+    max_packet_size = h->max_packet_size;
+    if (max_packet_size) {
+        buffer_size = max_packet_size; /* no need to bufferize more than one packet */
+    } else {
+        buffer_size = IO_BUFFER_SIZE;
+    }
+    if (!(h->flags & AVIO_FLAG_WRITE) && h->is_streamed) {
+        if (buffer_size > INT_MAX/2)
+            return AVERROR(EINVAL);
+        buffer_size *= 2;
+    }
+    buffer = av_malloc(buffer_size);
+    if (!buffer)
+        return AVERROR(ENOMEM);
+
+    *sp = avio_alloc_context(buffer, buffer_size, h->flags & AVIO_FLAG_WRITE, h,
+                             ffurl_read2, ffurl_write2, ffurl_seek2);
+    if (!*sp) {
+        av_freep(&buffer);
+        return AVERROR(ENOMEM);
+    }
+    s = *sp;
+    if (h->protocol_whitelist) {
+        s->protocol_whitelist = av_strdup(h->protocol_whitelist);
+        if (!s->protocol_whitelist) {
+            avio_closep(sp);
+            return AVERROR(ENOMEM);
+        }
+    }
+    if (h->protocol_blacklist) {
+        s->protocol_blacklist = av_strdup(h->protocol_blacklist);
+        if (!s->protocol_blacklist) {
+            avio_closep(sp);
+            return AVERROR(ENOMEM);
+        }
+    }
+    s->direct = h->flags & AVIO_FLAG_DIRECT;
+
+    s->seekable = h->is_streamed ? 0 : AVIO_SEEKABLE_NORMAL;
+    s->max_packet_size = max_packet_size;
+    s->min_packet_size = h->min_packet_size;
+    if(h->prot) {
+        s->read_pause = h->prot->url_read_pause;
+        s->read_seek  = h->prot->url_read_seek;
+
+        if (h->prot->url_read_seek)
+            s->seekable |= AVIO_SEEKABLE_TIME;
+    }
+    ((FFIOContext*)s)->short_seek_get = ffurl_get_short_seek;
+    s->av_class = &ff_avio_class;
+    return 0;
 }
 
+int ffio_open_whitelist(AVIOContext **s, const char *filename, int flags,
+                        const AVIOInterruptCB *int_cb, AVDictionary **options,
+                        const char *whitelist, const char *blacklist)
+{
+    URLContext *h;
+    int err;
+
+    *s = NULL;
+
+    err = ffurl_open_whitelist(&h, filename, flags, int_cb, options, whitelist, blacklist, NULL);
+    if (err < 0)
+        return err;
+    err = ffio_fdopen(s, h);
+    if (err < 0) {
+        ffurl_close(h);
+        return err;
+    }
+    return 0;
+}
+
+int avio_open2(AVIOContext **s, const char *filename, int flags,
+               const AVIOInterruptCB *int_cb, AVDictionary **options)
+{
+    return ffio_open_whitelist(s, filename, flags, int_cb, options, NULL, NULL);
+}
+
+int avio_open(AVIOContext **s, const char *filename, int flags)
+{
+    return avio_open2(s, filename, flags, NULL, NULL);
+}
+
+
 static inline int retry_transfer_wrapper(URLContext *h, uint8_t *buf,
+                                         const uint8_t *cbuf,
                                          int size, int size_min,
-                                         int (*transfer_func)(URLContext *h,
-                                                              uint8_t *buf,
-                                                              int size))
+                                         int read)
 {
     int ret, len;
     int fast_retries = 5;
@@ -375,7 +512,8 @@ static inline int retry_transfer_wrapper(URLContext *h, uint8_t *buf,
     while (len < size_min) {
         if (ff_check_interrupt(&h->interrupt_callback))
             return AVERROR_EXIT;
-        ret = transfer_func(h, buf + len, size - len);
+        ret = read ? h->prot->url_read (h, buf + len, size - len):
+                     h->prot->url_write(h, cbuf + len, size - len);
         if (ret == AVERROR(EINTR))
             continue;
         if (h->flags & AVIO_FLAG_NONBLOCK)
@@ -406,35 +544,38 @@ static inline int retry_transfer_wrapper(URLContext *h, uint8_t *buf,
     return len;
 }
 
-int ffurl_read(URLContext *h, unsigned char *buf, int size)
+int ffurl_read2(void *urlcontext, uint8_t *buf, int size)
 {
+    URLContext *h = urlcontext;
+
     if (!(h->flags & AVIO_FLAG_READ))
         return AVERROR(EIO);
-    return retry_transfer_wrapper(h, buf, size, 1, h->prot->url_read);
+    return retry_transfer_wrapper(h, buf, NULL, size, 1, 1);
 }
 
 int ffurl_read_complete(URLContext *h, unsigned char *buf, int size)
 {
     if (!(h->flags & AVIO_FLAG_READ))
         return AVERROR(EIO);
-    return retry_transfer_wrapper(h, buf, size, size, h->prot->url_read);
+    return retry_transfer_wrapper(h, buf, NULL, size, size, 1);
 }
 
-int ffurl_write(URLContext *h, const unsigned char *buf, int size)
+int ffurl_write2(void *urlcontext, const uint8_t *buf, int size)
 {
+    URLContext *h = urlcontext;
+
     if (!(h->flags & AVIO_FLAG_WRITE))
         return AVERROR(EIO);
     /* avoid sending too big packets */
     if (h->max_packet_size && size > h->max_packet_size)
         return AVERROR(EIO);
 
-    return retry_transfer_wrapper(h, (unsigned char *)buf, size, size,
-                                  (int (*)(struct URLContext *, uint8_t *, int))
-                                  h->prot->url_write);
+    return retry_transfer_wrapper(h, NULL, buf, size, size, 0);
 }
 
-int64_t ffurl_seek(URLContext *h, int64_t pos, int whence)
+int64_t ffurl_seek2(void *urlcontext, int64_t pos, int whence)
 {
+    URLContext *h = urlcontext;
     int64_t ret;
 
     if (!h->prot->url_seek)
@@ -471,6 +612,46 @@ int ffurl_close(URLContext *h)
     return ffurl_closep(&h);
 }
 
+int avio_close(AVIOContext *s)
+{
+    FFIOContext *const ctx = ffiocontext(s);
+    URLContext *h;
+    int ret, error;
+
+    if (!s)
+        return 0;
+
+    avio_flush(s);
+    h         = s->opaque;
+    s->opaque = NULL;
+
+    av_freep(&s->buffer);
+    if (s->write_flag)
+        av_log(s, AV_LOG_VERBOSE,
+               "Statistics: %"PRId64" bytes written, %d seeks, %d writeouts\n",
+               ctx->bytes_written, ctx->seek_count, ctx->writeout_count);
+    else
+        av_log(s, AV_LOG_VERBOSE, "Statistics: %"PRId64" bytes read, %d seeks\n",
+               ctx->bytes_read, ctx->seek_count);
+    av_opt_free(s);
+
+    error = s->error;
+    avio_context_free(&s);
+
+    ret = ffurl_close(h);
+    if (ret < 0)
+        return ret;
+
+    return error;
+}
+
+int avio_closep(AVIOContext **s)
+{
+    int ret = avio_close(*s);
+    *s = NULL;
+    return ret;
+}
+
 
 const char *avio_find_protocol_name(const char *url)
 {
@@ -498,7 +679,7 @@ int avio_check(const char *url, int flags)
     return ret;
 }
 
-int avpriv_io_move(const char *url_src, const char *url_dst)
+int ffurl_move(const char *url_src, const char *url_dst)
 {
     URLContext *h_src, *h_dst;
     int ret = ffurl_alloc(&h_src, url_src, AVIO_FLAG_READ_WRITE, NULL);
@@ -520,7 +701,7 @@ int avpriv_io_move(const char *url_src, const char *url_dst)
     return ret;
 }
 
-int avpriv_io_delete(const char *url)
+int ffurl_delete(const char *url)
 {
     URLContext *h;
     int ret = ffurl_alloc(&h, url, AVIO_FLAG_WRITE, NULL);
@@ -535,6 +716,10 @@ int avpriv_io_delete(const char *url)
     ffurl_close(h);
     return ret;
 }
+
+struct AVIODirContext {
+    struct URLContext *url_context;
+};
 
 int avio_open_dir(AVIODirContext **s, const char *url, AVDictionary **options)
 {
@@ -649,8 +834,10 @@ int ffurl_get_multi_file_handle(URLContext *h, int **handles, int *numhandles)
     return h->prot->url_get_multi_file_handle(h, handles, numhandles);
 }
 
-int ffurl_get_short_seek(URLContext *h)
+int ffurl_get_short_seek(void *urlcontext)
 {
+    URLContext *h = urlcontext;
+
     if (!h || !h->prot || !h->prot->url_get_short_seek)
         return AVERROR(ENOSYS);
     return h->prot->url_get_short_seek(h);
@@ -672,7 +859,7 @@ int ff_check_interrupt(AVIOInterruptCB *cb)
 
 int ff_rename(const char *url_src, const char *url_dst, void *logctx)
 {
-    int ret = avpriv_io_move(url_src, url_dst);
+    int ret = ffurl_move(url_src, url_dst);
     if (ret < 0)
         av_log(logctx, AV_LOG_ERROR, "failed to rename file %s to %s: %s\n", url_src, url_dst, av_err2str(ret));
     return ret;

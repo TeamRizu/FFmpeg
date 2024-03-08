@@ -111,16 +111,6 @@ static void npptranspose_uninit(AVFilterContext *ctx)
     av_frame_free(&s->tmp_frame);
 }
 
-static int npptranspose_query_formats(AVFilterContext *ctx)
-{
-    static const enum AVPixelFormat pixel_formats[] = {
-        AV_PIX_FMT_CUDA, AV_PIX_FMT_NONE,
-    };
-
-    AVFilterFormats *pix_fmts = ff_make_format_list(pixel_formats);
-    return ff_set_common_formats(ctx, pix_fmts);
-}
-
 static int init_stage(NPPTransposeStageContext *stage, AVBufferRef *device_ctx)
 {
     AVBufferRef *out_ref = NULL;
@@ -310,7 +300,7 @@ static int npptranspose_rotate(AVFilterContext *ctx, NPPTransposeStageContext *s
 
         // nppRotate uses 0,0 as the rotation point
         // need to shift the image accordingly after rotation
-        // need to substract 1 to get the correct coordinates
+        // need to subtract 1 to get the correct coordinates
         double angle = s->dir == NPP_TRANSPOSE_CLOCK ? -90.0 : s->dir == NPP_TRANSPOSE_CCLOCK ? 90.0 : 180.0;
         int shiftw = (s->dir == NPP_TRANSPOSE_CLOCK  || s->dir == NPP_TRANSPOSE_CLOCK_FLIP) ? ow - 1 : 0;
         int shifth = (s->dir == NPP_TRANSPOSE_CCLOCK || s->dir == NPP_TRANSPOSE_CLOCK_FLIP) ? oh - 1 : 0;
@@ -436,15 +426,15 @@ fail:
 #define FLAGS (AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM)
 
 static const AVOption options[] = {
-    { "dir", "set transpose direction", OFFSET(dir), AV_OPT_TYPE_INT, { .i64 = NPP_TRANSPOSE_CCLOCK_FLIP }, 0, 3, FLAGS, "dir" },
-        { "cclock_flip", "rotate counter-clockwise with vertical flip", 0, AV_OPT_TYPE_CONST, { .i64 = NPP_TRANSPOSE_CCLOCK_FLIP }, 0, 0, FLAGS, "dir" },
-        { "clock",       "rotate clockwise",                            0, AV_OPT_TYPE_CONST, { .i64 = NPP_TRANSPOSE_CLOCK       }, 0, 0, FLAGS, "dir" },
-        { "cclock",      "rotate counter-clockwise",                    0, AV_OPT_TYPE_CONST, { .i64 = NPP_TRANSPOSE_CCLOCK      }, 0, 0, FLAGS, "dir" },
-        { "clock_flip",  "rotate clockwise with vertical flip",         0, AV_OPT_TYPE_CONST, { .i64 = NPP_TRANSPOSE_CLOCK_FLIP  }, 0, 0, FLAGS, "dir" },
-    { "passthrough", "do not apply transposition if the input matches the specified geometry", OFFSET(passthrough), AV_OPT_TYPE_INT, { .i64 = NPP_TRANSPOSE_PT_TYPE_NONE },  0, 2, FLAGS, "passthrough" },
-        { "none",      "always apply transposition",  0, AV_OPT_TYPE_CONST, { .i64 = NPP_TRANSPOSE_PT_TYPE_NONE },      0, 0, FLAGS, "passthrough" },
-        { "landscape", "preserve landscape geometry", 0, AV_OPT_TYPE_CONST, { .i64 = NPP_TRANSPOSE_PT_TYPE_LANDSCAPE }, 0, 0, FLAGS, "passthrough" },
-        { "portrait",  "preserve portrait geometry",  0, AV_OPT_TYPE_CONST, { .i64 = NPP_TRANSPOSE_PT_TYPE_PORTRAIT },  0, 0, FLAGS, "passthrough" },
+    { "dir", "set transpose direction", OFFSET(dir), AV_OPT_TYPE_INT, { .i64 = NPP_TRANSPOSE_CCLOCK_FLIP }, 0, 3, FLAGS, .unit = "dir" },
+        { "cclock_flip", "rotate counter-clockwise with vertical flip", 0, AV_OPT_TYPE_CONST, { .i64 = NPP_TRANSPOSE_CCLOCK_FLIP }, 0, 0, FLAGS, .unit = "dir" },
+        { "clock",       "rotate clockwise",                            0, AV_OPT_TYPE_CONST, { .i64 = NPP_TRANSPOSE_CLOCK       }, 0, 0, FLAGS, .unit = "dir" },
+        { "cclock",      "rotate counter-clockwise",                    0, AV_OPT_TYPE_CONST, { .i64 = NPP_TRANSPOSE_CCLOCK      }, 0, 0, FLAGS, .unit = "dir" },
+        { "clock_flip",  "rotate clockwise with vertical flip",         0, AV_OPT_TYPE_CONST, { .i64 = NPP_TRANSPOSE_CLOCK_FLIP  }, 0, 0, FLAGS, .unit = "dir" },
+    { "passthrough", "do not apply transposition if the input matches the specified geometry", OFFSET(passthrough), AV_OPT_TYPE_INT, { .i64 = NPP_TRANSPOSE_PT_TYPE_NONE },  0, 2, FLAGS, .unit = "passthrough" },
+        { "none",      "always apply transposition",  0, AV_OPT_TYPE_CONST, { .i64 = NPP_TRANSPOSE_PT_TYPE_NONE },      0, 0, FLAGS, .unit = "passthrough" },
+        { "landscape", "preserve landscape geometry", 0, AV_OPT_TYPE_CONST, { .i64 = NPP_TRANSPOSE_PT_TYPE_LANDSCAPE }, 0, 0, FLAGS, .unit = "passthrough" },
+        { "portrait",  "preserve portrait geometry",  0, AV_OPT_TYPE_CONST, { .i64 = NPP_TRANSPOSE_PT_TYPE_PORTRAIT },  0, 0, FLAGS, .unit = "passthrough" },
     { NULL },
 };
 
@@ -461,7 +451,6 @@ static const AVFilterPad npptranspose_inputs[] = {
         .type         = AVMEDIA_TYPE_VIDEO,
         .filter_frame = npptranspose_filter_frame,
     },
-    { NULL }
 };
 
 static const AVFilterPad npptranspose_outputs[] = {
@@ -470,18 +459,17 @@ static const AVFilterPad npptranspose_outputs[] = {
         .type         = AVMEDIA_TYPE_VIDEO,
         .config_props = npptranspose_config_props,
     },
-    { NULL }
 };
 
-AVFilter ff_vf_transpose_npp = {
+const AVFilter ff_vf_transpose_npp = {
     .name           = "transpose_npp",
     .description    = NULL_IF_CONFIG_SMALL("NVIDIA Performance Primitives video transpose"),
     .init           = npptranspose_init,
     .uninit         = npptranspose_uninit,
-    .query_formats  = npptranspose_query_formats,
     .priv_size      = sizeof(NPPTransposeContext),
     .priv_class     = &npptranspose_class,
-    .inputs         = npptranspose_inputs,
-    .outputs        = npptranspose_outputs,
+    FILTER_INPUTS(npptranspose_inputs),
+    FILTER_OUTPUTS(npptranspose_outputs),
+    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_CUDA),
     .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
 };

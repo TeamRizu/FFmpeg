@@ -17,16 +17,14 @@
  */
 #include <string.h>
 
-#include "libavutil/avassert.h"
-#include "libavutil/mem.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
 
 #include "avfilter.h"
-#include "formats.h"
 #include "internal.h"
 #include "transpose.h"
 #include "vaapi_vpp.h"
+#include "video.h"
 
 typedef struct TransposeVAAPIContext {
     VAAPIVPPContext vpp_ctx; // must be the first field
@@ -233,7 +231,7 @@ static AVFrame *get_video_buffer(AVFilterLink *inlink, int w, int h)
 #define OFFSET(x) offsetof(TransposeVAAPIContext, x)
 #define FLAGS (AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_FILTERING_PARAM)
 static const AVOption transpose_vaapi_options[] = {
-    { "dir", "set transpose direction", OFFSET(dir), AV_OPT_TYPE_INT, { .i64 = TRANSPOSE_CCLOCK_FLIP }, 0, 6, FLAGS, "dir" },
+    { "dir", "set transpose direction", OFFSET(dir), AV_OPT_TYPE_INT, { .i64 = TRANSPOSE_CCLOCK_FLIP }, 0, 6, FLAGS, .unit = "dir" },
         { "cclock_flip",   "rotate counter-clockwise with vertical flip", 0, AV_OPT_TYPE_CONST, { .i64 = TRANSPOSE_CCLOCK_FLIP }, .flags=FLAGS, .unit = "dir" },
         { "clock",         "rotate clockwise",                            0, AV_OPT_TYPE_CONST, { .i64 = TRANSPOSE_CLOCK       }, .flags=FLAGS, .unit = "dir" },
         { "cclock",        "rotate counter-clockwise",                    0, AV_OPT_TYPE_CONST, { .i64 = TRANSPOSE_CCLOCK      }, .flags=FLAGS, .unit = "dir" },
@@ -243,10 +241,10 @@ static const AVOption transpose_vaapi_options[] = {
         { "vflip",         "flip vertically",                             0, AV_OPT_TYPE_CONST, { .i64 = TRANSPOSE_VFLIP       }, .flags=FLAGS, .unit = "dir" },
 
     { "passthrough", "do not apply transposition if the input matches the specified geometry",
-      OFFSET(passthrough), AV_OPT_TYPE_INT, {.i64=TRANSPOSE_PT_TYPE_NONE},  0, INT_MAX, FLAGS, "passthrough" },
-        { "none",      "always apply transposition",   0, AV_OPT_TYPE_CONST, {.i64=TRANSPOSE_PT_TYPE_NONE},      INT_MIN, INT_MAX, FLAGS, "passthrough" },
-        { "portrait",  "preserve portrait geometry",   0, AV_OPT_TYPE_CONST, {.i64=TRANSPOSE_PT_TYPE_PORTRAIT},  INT_MIN, INT_MAX, FLAGS, "passthrough" },
-        { "landscape", "preserve landscape geometry",  0, AV_OPT_TYPE_CONST, {.i64=TRANSPOSE_PT_TYPE_LANDSCAPE}, INT_MIN, INT_MAX, FLAGS, "passthrough" },
+      OFFSET(passthrough), AV_OPT_TYPE_INT, {.i64=TRANSPOSE_PT_TYPE_NONE},  0, INT_MAX, FLAGS, .unit = "passthrough" },
+        { "none",      "always apply transposition",   0, AV_OPT_TYPE_CONST, {.i64=TRANSPOSE_PT_TYPE_NONE},      INT_MIN, INT_MAX, FLAGS, .unit = "passthrough" },
+        { "portrait",  "preserve portrait geometry",   0, AV_OPT_TYPE_CONST, {.i64=TRANSPOSE_PT_TYPE_PORTRAIT},  INT_MIN, INT_MAX, FLAGS, .unit = "passthrough" },
+        { "landscape", "preserve landscape geometry",  0, AV_OPT_TYPE_CONST, {.i64=TRANSPOSE_PT_TYPE_LANDSCAPE}, INT_MIN, INT_MAX, FLAGS, .unit = "passthrough" },
 
     { NULL }
 };
@@ -259,10 +257,9 @@ static const AVFilterPad transpose_vaapi_inputs[] = {
         .name         = "default",
         .type         = AVMEDIA_TYPE_VIDEO,
         .filter_frame = &transpose_vaapi_filter_frame,
-        .get_video_buffer = get_video_buffer,
+        .get_buffer.video = get_video_buffer,
         .config_props = &ff_vaapi_vpp_config_input,
     },
-    { NULL }
 };
 
 static const AVFilterPad transpose_vaapi_outputs[] = {
@@ -271,18 +268,17 @@ static const AVFilterPad transpose_vaapi_outputs[] = {
         .type = AVMEDIA_TYPE_VIDEO,
         .config_props = &transpose_vaapi_vpp_config_output,
     },
-    { NULL }
 };
 
-AVFilter ff_vf_transpose_vaapi = {
+const AVFilter ff_vf_transpose_vaapi = {
     .name           = "transpose_vaapi",
     .description    = NULL_IF_CONFIG_SMALL("VAAPI VPP for transpose"),
     .priv_size      = sizeof(TransposeVAAPIContext),
     .init           = &transpose_vaapi_init,
     .uninit         = &ff_vaapi_vpp_ctx_uninit,
-    .query_formats  = &ff_vaapi_vpp_query_formats,
-    .inputs         = transpose_vaapi_inputs,
-    .outputs        = transpose_vaapi_outputs,
+    FILTER_INPUTS(transpose_vaapi_inputs),
+    FILTER_OUTPUTS(transpose_vaapi_outputs),
+    FILTER_QUERY_FUNC(&ff_vaapi_vpp_query_formats),
     .priv_class     = &transpose_vaapi_class,
     .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
 };

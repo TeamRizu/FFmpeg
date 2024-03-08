@@ -22,6 +22,7 @@
 #include "libavutil/intreadwrite.h"
 #include "libavcodec/internal.h"
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 #include "pcm.h"
 #include "ircam.h"
@@ -66,12 +67,12 @@ static int ircam_read_header(AVFormatContext *s)
     }
 
     if (le == 1) {
-        sample_rate = av_int2float(avio_rl32(s->pb));
+        sample_rate = lrintf(av_int2float(avio_rl32(s->pb)));
         channels    = avio_rl32(s->pb);
         tag         = avio_rl32(s->pb);
         tags        = ff_codec_ircam_le_tags;
     } else if (le == 0) {
-        sample_rate = av_int2float(avio_rb32(s->pb));
+        sample_rate = lrintf(av_int2float(avio_rb32(s->pb)));
         channels    = avio_rb32(s->pb);
         tag         = avio_rb32(s->pb);
         tags        = ff_codec_ircam_be_tags;
@@ -87,8 +88,8 @@ static int ircam_read_header(AVFormatContext *s)
         return AVERROR(ENOMEM);
 
     st->codecpar->codec_type  = AVMEDIA_TYPE_AUDIO;
-    st->codecpar->channels    = channels;
-    if (st->codecpar->channels > FF_SANE_NB_CHANNELS)
+    st->codecpar->ch_layout.nb_channels = channels;
+    if (st->codecpar->ch_layout.nb_channels > FF_SANE_NB_CHANNELS)
         return AVERROR(ENOSYS);
     st->codecpar->sample_rate = sample_rate;
 
@@ -99,20 +100,21 @@ static int ircam_read_header(AVFormatContext *s)
     }
 
     st->codecpar->bits_per_coded_sample = av_get_bits_per_sample(st->codecpar->codec_id);
-    st->codecpar->block_align = st->codecpar->bits_per_coded_sample * st->codecpar->channels / 8;
+    st->codecpar->block_align = st->codecpar->bits_per_coded_sample *
+                                st->codecpar->ch_layout.nb_channels / 8;
     avpriv_set_pts_info(st, 64, 1, st->codecpar->sample_rate);
     avio_skip(s->pb, 1008);
 
     return 0;
 }
 
-AVInputFormat ff_ircam_demuxer = {
-    .name           = "ircam",
-    .long_name      = NULL_IF_CONFIG_SMALL("Berkeley/IRCAM/CARL Sound Format"),
+const FFInputFormat ff_ircam_demuxer = {
+    .p.name         = "ircam",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("Berkeley/IRCAM/CARL Sound Format"),
+    .p.extensions   = "sf,ircam",
+    .p.flags        = AVFMT_GENERIC_INDEX,
     .read_probe     = ircam_probe,
     .read_header    = ircam_read_header,
     .read_packet    = ff_pcm_read_packet,
     .read_seek      = ff_pcm_read_seek,
-    .extensions     = "sf,ircam",
-    .flags          = AVFMT_GENERIC_INDEX,
 };

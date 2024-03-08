@@ -19,7 +19,6 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include "libavutil/avassert.h"
 #include "libavutil/opt.h"
 #include "libavutil/parseutils.h"
 #include "libavutil/pixdesc.h"
@@ -36,6 +35,12 @@ typedef struct ThreadData {
     int offset_y;
     int offset_x;
 } ThreadData;
+
+enum FitMode {
+    FM_NONE,
+    FM_SIZE,
+    NB_FITMODES
+};
 
 enum FilterType {
     LOWPASS,
@@ -114,6 +119,8 @@ typedef struct WaveformContext {
     int            rgb;
     float          ftint[2];
     int            tint[2];
+    int            fitmode;
+    int            input;
 
     int (*waveform_slice)(AVFilterContext *ctx, void *arg,
                           int jobnr, int nb_jobs);
@@ -129,62 +136,70 @@ typedef struct WaveformContext {
 
 #define OFFSET(x) offsetof(WaveformContext, x)
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM
+#define TFLAGS AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM|AV_OPT_FLAG_RUNTIME_PARAM
 
 static const AVOption waveform_options[] = {
-    { "mode", "set mode", OFFSET(mode), AV_OPT_TYPE_INT, {.i64=1}, 0, 1, FLAGS, "mode" },
-    { "m",    "set mode", OFFSET(mode), AV_OPT_TYPE_INT, {.i64=1}, 0, 1, FLAGS, "mode" },
-        { "row",    NULL, 0, AV_OPT_TYPE_CONST, {.i64=0}, 0, 0, FLAGS, "mode" },
-        { "column", NULL, 0, AV_OPT_TYPE_CONST, {.i64=1}, 0, 0, FLAGS, "mode" },
-    { "intensity", "set intensity", OFFSET(fintensity), AV_OPT_TYPE_FLOAT, {.dbl=0.04}, 0, 1, FLAGS },
-    { "i",         "set intensity", OFFSET(fintensity), AV_OPT_TYPE_FLOAT, {.dbl=0.04}, 0, 1, FLAGS },
+    { "mode", "set mode", OFFSET(mode), AV_OPT_TYPE_INT, {.i64=1}, 0, 1, FLAGS, .unit = "mode" },
+    { "m",    "set mode", OFFSET(mode), AV_OPT_TYPE_INT, {.i64=1}, 0, 1, FLAGS, .unit = "mode" },
+        { "row",    NULL, 0, AV_OPT_TYPE_CONST, {.i64=0}, 0, 0, FLAGS, .unit = "mode" },
+        { "column", NULL, 0, AV_OPT_TYPE_CONST, {.i64=1}, 0, 0, FLAGS, .unit = "mode" },
+    { "intensity", "set intensity", OFFSET(fintensity), AV_OPT_TYPE_FLOAT, {.dbl=0.04}, 0, 1, TFLAGS },
+    { "i",         "set intensity", OFFSET(fintensity), AV_OPT_TYPE_FLOAT, {.dbl=0.04}, 0, 1, TFLAGS },
     { "mirror", "set mirroring", OFFSET(mirror), AV_OPT_TYPE_BOOL, {.i64=1}, 0, 1, FLAGS },
     { "r",      "set mirroring", OFFSET(mirror), AV_OPT_TYPE_BOOL, {.i64=1}, 0, 1, FLAGS },
-    { "display", "set display mode", OFFSET(display), AV_OPT_TYPE_INT, {.i64=STACK}, 0, NB_DISPLAYS-1, FLAGS, "display" },
-    { "d",       "set display mode", OFFSET(display), AV_OPT_TYPE_INT, {.i64=STACK}, 0, NB_DISPLAYS-1, FLAGS, "display" },
-        { "overlay", NULL, 0, AV_OPT_TYPE_CONST, {.i64=OVERLAY}, 0, 0, FLAGS, "display" },
-        { "stack",   NULL, 0, AV_OPT_TYPE_CONST, {.i64=STACK},   0, 0, FLAGS, "display" },
-        { "parade",  NULL, 0, AV_OPT_TYPE_CONST, {.i64=PARADE},  0, 0, FLAGS, "display" },
+    { "display", "set display mode", OFFSET(display), AV_OPT_TYPE_INT, {.i64=STACK}, 0, NB_DISPLAYS-1, FLAGS, .unit = "display" },
+    { "d",       "set display mode", OFFSET(display), AV_OPT_TYPE_INT, {.i64=STACK}, 0, NB_DISPLAYS-1, FLAGS, .unit = "display" },
+        { "overlay", NULL, 0, AV_OPT_TYPE_CONST, {.i64=OVERLAY}, 0, 0, FLAGS, .unit = "display" },
+        { "stack",   NULL, 0, AV_OPT_TYPE_CONST, {.i64=STACK},   0, 0, FLAGS, .unit = "display" },
+        { "parade",  NULL, 0, AV_OPT_TYPE_CONST, {.i64=PARADE},  0, 0, FLAGS, .unit = "display" },
     { "components", "set components to display", OFFSET(pcomp), AV_OPT_TYPE_INT, {.i64=1}, 1, 15, FLAGS },
     { "c",          "set components to display", OFFSET(pcomp), AV_OPT_TYPE_INT, {.i64=1}, 1, 15, FLAGS },
-    { "envelope", "set envelope to display", OFFSET(envelope), AV_OPT_TYPE_INT, {.i64=0}, 0, 3, FLAGS, "envelope" },
-    { "e",        "set envelope to display", OFFSET(envelope), AV_OPT_TYPE_INT, {.i64=0}, 0, 3, FLAGS, "envelope" },
-        { "none",         NULL, 0, AV_OPT_TYPE_CONST, {.i64=0}, 0, 0, FLAGS, "envelope" },
-        { "instant",      NULL, 0, AV_OPT_TYPE_CONST, {.i64=1}, 0, 0, FLAGS, "envelope" },
-        { "peak",         NULL, 0, AV_OPT_TYPE_CONST, {.i64=2}, 0, 0, FLAGS, "envelope" },
-        { "peak+instant", NULL, 0, AV_OPT_TYPE_CONST, {.i64=3}, 0, 0, FLAGS, "envelope" },
-    { "filter", "set filter", OFFSET(filter), AV_OPT_TYPE_INT, {.i64=0}, 0, NB_FILTERS-1, FLAGS, "filter" },
-    { "f",      "set filter", OFFSET(filter), AV_OPT_TYPE_INT, {.i64=0}, 0, NB_FILTERS-1, FLAGS, "filter" },
-        { "lowpass", NULL, 0, AV_OPT_TYPE_CONST, {.i64=LOWPASS}, 0, 0, FLAGS, "filter" },
-        { "flat"   , NULL, 0, AV_OPT_TYPE_CONST, {.i64=FLAT},    0, 0, FLAGS, "filter" },
-        { "aflat"  , NULL, 0, AV_OPT_TYPE_CONST, {.i64=AFLAT},   0, 0, FLAGS, "filter" },
-        { "chroma",  NULL, 0, AV_OPT_TYPE_CONST, {.i64=CHROMA},  0, 0, FLAGS, "filter" },
-        { "color",   NULL, 0, AV_OPT_TYPE_CONST, {.i64=COLOR},   0, 0, FLAGS, "filter" },
-        { "acolor",  NULL, 0, AV_OPT_TYPE_CONST, {.i64=ACOLOR},  0, 0, FLAGS, "filter" },
-        { "xflat",   NULL, 0, AV_OPT_TYPE_CONST, {.i64=XFLAT},   0, 0, FLAGS, "filter" },
-        { "yflat",   NULL, 0, AV_OPT_TYPE_CONST, {.i64=YFLAT},   0, 0, FLAGS, "filter" },
-    { "graticule", "set graticule", OFFSET(graticule), AV_OPT_TYPE_INT, {.i64=0}, 0, NB_GRATICULES-1, FLAGS, "graticule" },
-    { "g",         "set graticule", OFFSET(graticule), AV_OPT_TYPE_INT, {.i64=0}, 0, NB_GRATICULES-1, FLAGS, "graticule" },
-        { "none",   NULL, 0, AV_OPT_TYPE_CONST, {.i64=GRAT_NONE},   0, 0, FLAGS, "graticule" },
-        { "green",  NULL, 0, AV_OPT_TYPE_CONST, {.i64=GRAT_GREEN},  0, 0, FLAGS, "graticule" },
-        { "orange", NULL, 0, AV_OPT_TYPE_CONST, {.i64=GRAT_ORANGE}, 0, 0, FLAGS, "graticule" },
-        { "invert", NULL, 0, AV_OPT_TYPE_CONST, {.i64=GRAT_INVERT}, 0, 0, FLAGS, "graticule" },
-    { "opacity", "set graticule opacity", OFFSET(opacity), AV_OPT_TYPE_FLOAT, {.dbl=0.75}, 0, 1, FLAGS },
-    { "o",       "set graticule opacity", OFFSET(opacity), AV_OPT_TYPE_FLOAT, {.dbl=0.75}, 0, 1, FLAGS },
-    { "flags", "set graticule flags", OFFSET(flags), AV_OPT_TYPE_FLAGS, {.i64=1}, 0, 3, FLAGS, "flags" },
-    { "fl",    "set graticule flags", OFFSET(flags), AV_OPT_TYPE_FLAGS, {.i64=1}, 0, 3, FLAGS, "flags" },
-        { "numbers",  "draw numbers", 0, AV_OPT_TYPE_CONST, {.i64=1}, 0, 0, FLAGS, "flags" },
-        { "dots",     "draw dots instead of lines", 0, AV_OPT_TYPE_CONST, {.i64=2}, 0, 0, FLAGS, "flags" },
-    { "scale", "set scale", OFFSET(scale), AV_OPT_TYPE_INT, {.i64=0}, 0, NB_SCALES-1, FLAGS, "scale" },
-    { "s",     "set scale", OFFSET(scale), AV_OPT_TYPE_INT, {.i64=0}, 0, NB_SCALES-1, FLAGS, "scale" },
-        { "digital",    NULL, 0, AV_OPT_TYPE_CONST, {.i64=DIGITAL},    0, 0, FLAGS, "scale" },
-        { "millivolts", NULL, 0, AV_OPT_TYPE_CONST, {.i64=MILLIVOLTS}, 0, 0, FLAGS, "scale" },
-        { "ire",        NULL, 0, AV_OPT_TYPE_CONST, {.i64=IRE},        0, 0, FLAGS, "scale" },
-    { "bgopacity", "set background opacity", OFFSET(bgopacity), AV_OPT_TYPE_FLOAT, {.dbl=0.75}, 0, 1, FLAGS },
-    { "b",         "set background opacity", OFFSET(bgopacity), AV_OPT_TYPE_FLOAT, {.dbl=0.75}, 0, 1, FLAGS },
-    { "tint0", "set 1st tint", OFFSET(ftint[0]), AV_OPT_TYPE_FLOAT, {.dbl=0}, -1, 1, FLAGS},
-    { "t0",    "set 1st tint", OFFSET(ftint[0]), AV_OPT_TYPE_FLOAT, {.dbl=0}, -1, 1, FLAGS},
-    { "tint1", "set 2nd tint", OFFSET(ftint[1]), AV_OPT_TYPE_FLOAT, {.dbl=0}, -1, 1, FLAGS},
-    { "t1",    "set 2nd tint", OFFSET(ftint[1]), AV_OPT_TYPE_FLOAT, {.dbl=0}, -1, 1, FLAGS},
+    { "envelope", "set envelope to display", OFFSET(envelope), AV_OPT_TYPE_INT, {.i64=0}, 0, 3, TFLAGS, .unit = "envelope" },
+    { "e",        "set envelope to display", OFFSET(envelope), AV_OPT_TYPE_INT, {.i64=0}, 0, 3, TFLAGS, .unit = "envelope" },
+        { "none",         NULL, 0, AV_OPT_TYPE_CONST, {.i64=0}, 0, 0, TFLAGS, .unit = "envelope" },
+        { "instant",      NULL, 0, AV_OPT_TYPE_CONST, {.i64=1}, 0, 0, TFLAGS, .unit = "envelope" },
+        { "peak",         NULL, 0, AV_OPT_TYPE_CONST, {.i64=2}, 0, 0, TFLAGS, .unit = "envelope" },
+        { "peak+instant", NULL, 0, AV_OPT_TYPE_CONST, {.i64=3}, 0, 0, TFLAGS, .unit = "envelope" },
+    { "filter", "set filter", OFFSET(filter), AV_OPT_TYPE_INT, {.i64=0}, 0, NB_FILTERS-1, FLAGS, .unit = "filter" },
+    { "f",      "set filter", OFFSET(filter), AV_OPT_TYPE_INT, {.i64=0}, 0, NB_FILTERS-1, FLAGS, .unit = "filter" },
+        { "lowpass", NULL, 0, AV_OPT_TYPE_CONST, {.i64=LOWPASS}, 0, 0, FLAGS, .unit = "filter" },
+        { "flat"   , NULL, 0, AV_OPT_TYPE_CONST, {.i64=FLAT},    0, 0, FLAGS, .unit = "filter" },
+        { "aflat"  , NULL, 0, AV_OPT_TYPE_CONST, {.i64=AFLAT},   0, 0, FLAGS, .unit = "filter" },
+        { "chroma",  NULL, 0, AV_OPT_TYPE_CONST, {.i64=CHROMA},  0, 0, FLAGS, .unit = "filter" },
+        { "color",   NULL, 0, AV_OPT_TYPE_CONST, {.i64=COLOR},   0, 0, FLAGS, .unit = "filter" },
+        { "acolor",  NULL, 0, AV_OPT_TYPE_CONST, {.i64=ACOLOR},  0, 0, FLAGS, .unit = "filter" },
+        { "xflat",   NULL, 0, AV_OPT_TYPE_CONST, {.i64=XFLAT},   0, 0, FLAGS, .unit = "filter" },
+        { "yflat",   NULL, 0, AV_OPT_TYPE_CONST, {.i64=YFLAT},   0, 0, FLAGS, .unit = "filter" },
+    { "graticule", "set graticule", OFFSET(graticule), AV_OPT_TYPE_INT, {.i64=0}, 0, NB_GRATICULES-1, FLAGS, .unit = "graticule" },
+    { "g",         "set graticule", OFFSET(graticule), AV_OPT_TYPE_INT, {.i64=0}, 0, NB_GRATICULES-1, FLAGS, .unit = "graticule" },
+        { "none",   NULL, 0, AV_OPT_TYPE_CONST, {.i64=GRAT_NONE},   0, 0, FLAGS, .unit = "graticule" },
+        { "green",  NULL, 0, AV_OPT_TYPE_CONST, {.i64=GRAT_GREEN},  0, 0, FLAGS, .unit = "graticule" },
+        { "orange", NULL, 0, AV_OPT_TYPE_CONST, {.i64=GRAT_ORANGE}, 0, 0, FLAGS, .unit = "graticule" },
+        { "invert", NULL, 0, AV_OPT_TYPE_CONST, {.i64=GRAT_INVERT}, 0, 0, FLAGS, .unit = "graticule" },
+    { "opacity", "set graticule opacity", OFFSET(opacity), AV_OPT_TYPE_FLOAT, {.dbl=0.75}, 0, 1, TFLAGS },
+    { "o",       "set graticule opacity", OFFSET(opacity), AV_OPT_TYPE_FLOAT, {.dbl=0.75}, 0, 1, TFLAGS },
+    { "flags", "set graticule flags", OFFSET(flags), AV_OPT_TYPE_FLAGS, {.i64=1}, 0, 3, TFLAGS, .unit = "flags" },
+    { "fl",    "set graticule flags", OFFSET(flags), AV_OPT_TYPE_FLAGS, {.i64=1}, 0, 3, TFLAGS, .unit = "flags" },
+        { "numbers",  "draw numbers", 0, AV_OPT_TYPE_CONST, {.i64=1}, 0, 0, TFLAGS, .unit = "flags" },
+        { "dots",     "draw dots instead of lines", 0, AV_OPT_TYPE_CONST, {.i64=2}, 0, 0, TFLAGS, .unit = "flags" },
+    { "scale", "set scale", OFFSET(scale), AV_OPT_TYPE_INT, {.i64=0}, 0, NB_SCALES-1, FLAGS, .unit = "scale" },
+    { "s",     "set scale", OFFSET(scale), AV_OPT_TYPE_INT, {.i64=0}, 0, NB_SCALES-1, FLAGS, .unit = "scale" },
+        { "digital",    NULL, 0, AV_OPT_TYPE_CONST, {.i64=DIGITAL},    0, 0, FLAGS, .unit = "scale" },
+        { "millivolts", NULL, 0, AV_OPT_TYPE_CONST, {.i64=MILLIVOLTS}, 0, 0, FLAGS, .unit = "scale" },
+        { "ire",        NULL, 0, AV_OPT_TYPE_CONST, {.i64=IRE},        0, 0, FLAGS, .unit = "scale" },
+    { "bgopacity", "set background opacity", OFFSET(bgopacity), AV_OPT_TYPE_FLOAT, {.dbl=0.75}, 0, 1, TFLAGS },
+    { "b",         "set background opacity", OFFSET(bgopacity), AV_OPT_TYPE_FLOAT, {.dbl=0.75}, 0, 1, TFLAGS },
+    { "tint0", "set 1st tint", OFFSET(ftint[0]), AV_OPT_TYPE_FLOAT, {.dbl=0}, -1, 1, TFLAGS},
+    { "t0",    "set 1st tint", OFFSET(ftint[0]), AV_OPT_TYPE_FLOAT, {.dbl=0}, -1, 1, TFLAGS},
+    { "tint1", "set 2nd tint", OFFSET(ftint[1]), AV_OPT_TYPE_FLOAT, {.dbl=0}, -1, 1, TFLAGS},
+    { "t1",    "set 2nd tint", OFFSET(ftint[1]), AV_OPT_TYPE_FLOAT, {.dbl=0}, -1, 1, TFLAGS},
+    { "fitmode", "set fit mode", OFFSET(fitmode), AV_OPT_TYPE_INT, {.i64=0}, 0, NB_FITMODES-1, FLAGS, .unit = "fitmode" },
+    { "fm", "set fit mode", OFFSET(fitmode), AV_OPT_TYPE_INT, {.i64=0}, 0, NB_FITMODES-1, FLAGS, .unit = "fitmode" },
+        { "none", NULL, 0, AV_OPT_TYPE_CONST, {.i64=FM_NONE}, 0, 0, FLAGS, .unit = "fitmode" },
+        { "size", NULL, 0, AV_OPT_TYPE_CONST, {.i64=FM_SIZE}, 0, 0, FLAGS, .unit = "fitmode" },
+    { "input", "set input formats selection", OFFSET(input), AV_OPT_TYPE_INT, {.i64=1}, 0, 1, FLAGS, .unit = "input" },
+        { "all", "try to select from all available formats", 0, AV_OPT_TYPE_CONST, {.i64=0}, 0, 0, FLAGS, .unit = "input" },
+        { "first", "pick first available format", 0, AV_OPT_TYPE_CONST, {.i64=1},  0, 0, FLAGS, .unit = "input" },
     { NULL }
 };
 
@@ -303,13 +318,6 @@ static const enum AVPixelFormat out_gray12_lowpass_pix_fmts[] = {
     AV_PIX_FMT_NONE
 };
 
-static const enum AVPixelFormat flat_pix_fmts[] = {
-    AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUVJ444P,
-    AV_PIX_FMT_YUV444P9, AV_PIX_FMT_YUV444P10,
-    AV_PIX_FMT_YUV444P12,
-    AV_PIX_FMT_NONE
-};
-
 static int query_formats(AVFilterContext *ctx)
 {
     WaveformContext *s = ctx->priv;
@@ -352,7 +360,7 @@ static int query_formats(AVFilterContext *ctx)
     depth2 = desc2->comp[0].depth;
     if (ncomp != ncomp2 || depth != depth2)
         return AVERROR(EAGAIN);
-    for (i = 1; i < avff->nb_formats; i++) {
+    for (i = 1; i < avff->nb_formats && !s->input; i++) {
         desc = av_pix_fmt_desc_get(avff->formats[i]);
         if (rgb != (desc->flags & AV_PIX_FMT_FLAG_RGB) ||
             depth != desc->comp[0].depth)
@@ -741,7 +749,7 @@ static av_always_inline void lowpass16(WaveformContext *s,
         dst_data += dst_linesize * step;
     }
 
-    if (s->display != OVERLAY && column && !s->rgb) {
+    if (s->display != OVERLAY && column && !s->rgb && out->data[1] && out->data[2]) {
         const int mult = s->max / 256;
         const int bg = s->bg_color[0] * mult;
         const int t0 = s->tint[0];
@@ -765,7 +773,7 @@ static av_always_inline void lowpass16(WaveformContext *s,
             dst0 += dst_linesize;
             dst1 += dst_linesize;
         }
-    } else if (s->display != OVERLAY && !s->rgb) {
+    } else if (s->display != OVERLAY && !s->rgb && out->data[1] && out->data[2]) {
         const int mult = s->max / 256;
         const int bg = s->bg_color[0] * mult;
         const int t0 = s->tint[0];
@@ -878,7 +886,7 @@ static av_always_inline void lowpass(WaveformContext *s,
         dst_data += dst_linesize * step;
     }
 
-    if (s->display != OVERLAY && column && !s->rgb) {
+    if (s->display != OVERLAY && column && !s->rgb && out->data[1] && out->data[2]) {
         const int bg = s->bg_color[0];
         const int dst_h = 256;
         const int t0 = s->tint[0];
@@ -902,7 +910,7 @@ static av_always_inline void lowpass(WaveformContext *s,
             dst0 += dst_linesize;
             dst1 += dst_linesize;
         }
-    } else if (s->display != OVERLAY && !s->rgb) {
+    } else if (s->display != OVERLAY && !s->rgb && out->data[1] && out->data[2]) {
         const int bg = s->bg_color[0];
         const int dst_w = 256;
         const int t0 = s->tint[0];
@@ -3046,7 +3054,6 @@ static int config_input(AVFilterLink *inlink)
     s->ncomp = s->desc->nb_components;
     s->bits = s->desc->comp[0].depth;
     s->max = 1 << s->bits;
-    s->intensity = s->fintensity * (s->max - 1);
 
     s->shift_w[0] = s->shift_w[3] = 0;
     s->shift_h[0] = s->shift_h[3] = 0;
@@ -3287,9 +3294,6 @@ static int config_input(AVFilterLink *inlink)
 
     s->size = s->size << (s->bits - 8);
 
-    s->tint[0] = .5f * (s->ftint[0] + 1.f) * (s->size - 1);
-    s->tint[1] = .5f * (s->ftint[1] + 1.f) * (s->size - 1);
-
     switch (inlink->format) {
     case AV_PIX_FMT_GBRAP:
     case AV_PIX_FMT_GBRP:
@@ -3302,8 +3306,6 @@ static int config_input(AVFilterLink *inlink)
     default:
         memcpy(s->bg_color, black_yuva_color, sizeof(s->bg_color));
     }
-
-    s->bg_color[3] *= s->bgopacity;
 
     return 0;
 }
@@ -3365,7 +3367,20 @@ static int config_output(AVFilterLink *outlink)
         }
     }
 
-    outlink->sample_aspect_ratio = (AVRational){1,1};
+    switch (s->fitmode) {
+    case FM_NONE:
+        outlink->sample_aspect_ratio = (AVRational){ 1, 1 };
+        break;
+    case FM_SIZE:
+        if (s->mode)
+            outlink->sample_aspect_ratio = (AVRational){ s->size * comp, inlink->h };
+        else
+            outlink->sample_aspect_ratio = (AVRational){ inlink->w, s->size * comp };
+        break;
+    }
+
+    av_reduce(&outlink->sample_aspect_ratio.num, &outlink->sample_aspect_ratio.den,
+               outlink->sample_aspect_ratio.num,  outlink->sample_aspect_ratio.den, INT_MAX);
 
     return 0;
 }
@@ -3378,13 +3393,16 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     AVFrame *out;
     int i, j, k;
 
+    s->intensity = s->fintensity * (s->max - 1);
+    s->bg_color[3] = s->bgopacity * (s->max - 1);
+    s->tint[0] = .5f * (s->ftint[0] + 1.f) * (s->size - 1);
+    s->tint[1] = .5f * (s->ftint[1] + 1.f) * (s->size - 1);
+
     out = ff_get_video_buffer(outlink, outlink->w, outlink->h);
     if (!out) {
         av_frame_free(&in);
         return AVERROR(ENOMEM);
     }
-    out->pts = in->pts;
-    out->color_range = AVCOL_RANGE_JPEG;
 
     for (k = 0; k < s->dcomp; k++) {
         if (s->bits <= 8) {
@@ -3424,7 +3442,8 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
             td.component = k;
             td.offset_y = offset_y;
             td.offset_x = offset_x;
-            ctx->internal->execute(ctx, s->waveform_slice, &td, NULL, ff_filter_get_nb_threads(ctx));
+            ff_filter_execute(ctx, s->waveform_slice, &td, NULL,
+                              ff_filter_get_nb_threads(ctx));
             switch (s->filter) {
             case LOWPASS:
                 if (s->bits <= 8)
@@ -3467,7 +3486,10 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     }
     s->graticulef(s, out);
 
+    av_frame_copy_props(out, in);
+    out->color_range = AVCOL_RANGE_JPEG;
     av_frame_free(&in);
+    out->sample_aspect_ratio = outlink->sample_aspect_ratio;
     return ff_filter_frame(outlink, out);
 }
 
@@ -3485,7 +3507,6 @@ static const AVFilterPad inputs[] = {
         .filter_frame = filter_frame,
         .config_props = config_input,
     },
-    { NULL }
 };
 
 static const AVFilterPad outputs[] = {
@@ -3494,17 +3515,17 @@ static const AVFilterPad outputs[] = {
         .type         = AVMEDIA_TYPE_VIDEO,
         .config_props = config_output,
     },
-    { NULL }
 };
 
-AVFilter ff_vf_waveform = {
+const AVFilter ff_vf_waveform = {
     .name          = "waveform",
     .description   = NULL_IF_CONFIG_SMALL("Video waveform monitor."),
     .priv_size     = sizeof(WaveformContext),
     .priv_class    = &waveform_class,
-    .query_formats = query_formats,
     .uninit        = uninit,
-    .inputs        = inputs,
-    .outputs       = outputs,
+    FILTER_INPUTS(inputs),
+    FILTER_OUTPUTS(outputs),
+    FILTER_QUERY_FUNC(query_formats),
     .flags         = AVFILTER_FLAG_SLICE_THREADS,
+    .process_command = ff_filter_process_command,
 };

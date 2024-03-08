@@ -30,10 +30,13 @@
  * iCEDraw File demuxer
  */
 
+#include "config_components.h"
+
 #include "libavutil/intreadwrite.h"
 #include "libavutil/opt.h"
 #include "libavutil/parseutils.h"
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 #include "sauce.h"
 #include "libavcodec/bintext.h"
@@ -130,8 +133,6 @@ static int bin_probe(const AVProbeData *p)
 {
     const uint8_t *d = p->buf;
     int magic = 0, sauce = 0;
-    int invisible = 0;
-    int i;
 
     if (p->buf_size > 256)
         magic = !memcmp(d + p->buf_size - 256, next_magic, sizeof(next_magic));
@@ -154,12 +155,6 @@ static int bin_probe(const AVProbeData *p)
         calculate_height(&par, p->buf_size);
         if (par.height <= 0)
             return 0;
-
-        for (i = 0; i < p->buf_size - 256;  i+=2) {
-            if ((d[i+1] & 15) == (d[i+1] >> 4) && d[i] && d[i] != 0xFF && d[i] != ' ') {
-                invisible ++;
-            }
-        }
 
         if (par.width * par.height * 2 / (8*16) == p->buf_size)
             return AVPROBE_SCORE_MAX / 2;
@@ -394,50 +389,50 @@ static const AVOption options[] = {
 }}
 
 #if CONFIG_BINTEXT_DEMUXER
-AVInputFormat ff_bintext_demuxer = {
-    .name           = "bin",
-    .long_name      = NULL_IF_CONFIG_SMALL("Binary text"),
+const FFInputFormat ff_bintext_demuxer = {
+    .p.name         = "bin",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("Binary text"),
+    .p.priv_class   = CLASS("Binary text demuxer"),
     .priv_data_size = sizeof(BinDemuxContext),
     .read_probe     = bin_probe,
     .read_header    = bintext_read_header,
     .read_packet    = read_packet,
-    .priv_class     = CLASS("Binary text demuxer"),
 };
 #endif
 
 #if CONFIG_XBIN_DEMUXER
-AVInputFormat ff_xbin_demuxer = {
-    .name           = "xbin",
-    .long_name      = NULL_IF_CONFIG_SMALL("eXtended BINary text (XBIN)"),
+const FFInputFormat ff_xbin_demuxer = {
+    .p.name         = "xbin",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("eXtended BINary text (XBIN)"),
+    .p.priv_class   = CLASS("eXtended BINary text (XBIN) demuxer"),
     .priv_data_size = sizeof(BinDemuxContext),
     .read_probe     = xbin_probe,
     .read_header    = xbin_read_header,
     .read_packet    = read_packet,
-    .priv_class     = CLASS("eXtended BINary text (XBIN) demuxer"),
 };
 #endif
 
 #if CONFIG_ADF_DEMUXER
-AVInputFormat ff_adf_demuxer = {
-    .name           = "adf",
-    .long_name      = NULL_IF_CONFIG_SMALL("Artworx Data Format"),
+const FFInputFormat ff_adf_demuxer = {
+    .p.name         = "adf",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("Artworx Data Format"),
+    .p.extensions   = "adf",
+    .p.priv_class   = CLASS("Artworx Data Format demuxer"),
     .priv_data_size = sizeof(BinDemuxContext),
     .read_header    = adf_read_header,
     .read_packet    = read_packet,
-    .extensions     = "adf",
-    .priv_class     = CLASS("Artworx Data Format demuxer"),
 };
 #endif
 
 #if CONFIG_IDF_DEMUXER
-AVInputFormat ff_idf_demuxer = {
-    .name           = "idf",
-    .long_name      = NULL_IF_CONFIG_SMALL("iCE Draw File"),
+const FFInputFormat ff_idf_demuxer = {
+    .p.name         = "idf",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("iCE Draw File"),
+    .p.extensions   = "idf",
+    .p.priv_class   = CLASS("iCE Draw File demuxer"),
     .priv_data_size = sizeof(BinDemuxContext),
     .read_probe     = idf_probe,
     .read_header    = idf_read_header,
     .read_packet    = read_packet,
-    .extensions     = "idf",
-    .priv_class     = CLASS("iCE Draw File demuxer"),
 };
 #endif

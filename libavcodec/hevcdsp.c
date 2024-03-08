@@ -91,7 +91,8 @@ static const int8_t transform[32][32] = {
       90, -90,  88, -85,  82, -78,  73, -67,  61, -54,  46, -38,  31, -22,  13,  -4 },
 };
 
-DECLARE_ALIGNED(16, const int8_t, ff_hevc_epel_filters)[7][4] = {
+DECLARE_ALIGNED(16, const int8_t, ff_hevc_epel_filters)[8][4] = {
+    {  0 },
     { -2, 58, 10, -2},
     { -4, 54, 16, -2},
     { -6, 46, 28, -4},
@@ -101,7 +102,8 @@ DECLARE_ALIGNED(16, const int8_t, ff_hevc_epel_filters)[7][4] = {
     { -2, 10, 58, -2},
 };
 
-DECLARE_ALIGNED(16, const int8_t, ff_hevc_qpel_filters)[3][16] = {
+DECLARE_ALIGNED(16, const int8_t, ff_hevc_qpel_filters)[4][16] = {
+    { 0 },
     { -1,  4,-10, 58, 17, -5,  1,  0, -1,  4,-10, 58, 17, -5,  1,  0},
     { -1,  4,-11, 40, 40,-11,  4, -1, -1,  4,-11, 40, 40,-11,  4, -1},
     {  0,  1, -5, 17, 58,-10,  4, -1,  0,  1, -5, 17, 58,-10,  4, -1}
@@ -257,12 +259,17 @@ int i = 0;
         break;
     }
 
-    if (ARCH_ARM)
-        ff_hevc_dsp_init_arm(hevcdsp, bit_depth);
-    if (ARCH_PPC)
-        ff_hevc_dsp_init_ppc(hevcdsp, bit_depth);
-    if (ARCH_X86)
-        ff_hevc_dsp_init_x86(hevcdsp, bit_depth);
-    if (ARCH_MIPS)
-        ff_hevc_dsp_init_mips(hevcdsp, bit_depth);
+#if ARCH_AARCH64
+    ff_hevc_dsp_init_aarch64(hevcdsp, bit_depth);
+#elif ARCH_ARM
+    ff_hevc_dsp_init_arm(hevcdsp, bit_depth);
+#elif ARCH_PPC
+    ff_hevc_dsp_init_ppc(hevcdsp, bit_depth);
+#elif ARCH_X86
+    ff_hevc_dsp_init_x86(hevcdsp, bit_depth);
+#elif ARCH_MIPS
+    ff_hevc_dsp_init_mips(hevcdsp, bit_depth);
+#elif ARCH_LOONGARCH
+    ff_hevc_dsp_init_loongarch(hevcdsp, bit_depth);
+#endif
 }

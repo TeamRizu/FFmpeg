@@ -21,6 +21,7 @@
  */
 
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 #include "subtitles.h"
 #include "libavutil/bprint.h"
@@ -97,12 +98,14 @@ static int add_event(FFDemuxSubtitlesQueue *q, AVBPrint *buf, char *line_cache,
     if (append_cache && line_cache[0])
         av_bprintf(buf, "%s\n", line_cache);
     line_cache[0] = 0;
+    if (!av_bprint_is_complete(buf))
+        return AVERROR(ENOMEM);
 
     while (buf->len > 0 && buf->str[buf->len - 1] == '\n')
         buf->str[--buf->len] = 0;
 
     if (buf->len) {
-        AVPacket *sub = ff_subtitles_queue_insert(q, buf->str, buf->len, 0);
+        AVPacket *sub = ff_subtitles_queue_insert_bprint(q, buf, 0);
         if (!sub)
             return AVERROR(ENOMEM);
         av_bprint_clear(buf);
@@ -207,40 +210,18 @@ static int srt_read_header(AVFormatContext *s)
     ff_subtitles_queue_finalize(s, &srt->q);
 
 end:
-    if (res < 0)
-        ff_subtitles_queue_clean(&srt->q);
     av_bprint_finalize(&buf, NULL);
     return res;
 }
 
-static int srt_read_packet(AVFormatContext *s, AVPacket *pkt)
-{
-    SRTContext *srt = s->priv_data;
-    return ff_subtitles_queue_read_packet(&srt->q, pkt);
-}
-
-static int srt_read_seek(AVFormatContext *s, int stream_index,
-                         int64_t min_ts, int64_t ts, int64_t max_ts, int flags)
-{
-    SRTContext *srt = s->priv_data;
-    return ff_subtitles_queue_seek(&srt->q, s, stream_index,
-                                   min_ts, ts, max_ts, flags);
-}
-
-static int srt_read_close(AVFormatContext *s)
-{
-    SRTContext *srt = s->priv_data;
-    ff_subtitles_queue_clean(&srt->q);
-    return 0;
-}
-
-AVInputFormat ff_srt_demuxer = {
-    .name        = "srt",
-    .long_name   = NULL_IF_CONFIG_SMALL("SubRip subtitle"),
+const FFInputFormat ff_srt_demuxer = {
+    .p.name      = "srt",
+    .p.long_name = NULL_IF_CONFIG_SMALL("SubRip subtitle"),
     .priv_data_size = sizeof(SRTContext),
+    .flags_internal = FF_FMT_INIT_CLEANUP,
     .read_probe  = srt_probe,
     .read_header = srt_read_header,
-    .read_packet = srt_read_packet,
-    .read_seek2  = srt_read_seek,
-    .read_close  = srt_read_close,
+    .read_packet = ff_subtitles_read_packet,
+    .read_seek2  = ff_subtitles_read_seek,
+    .read_close  = ff_subtitles_read_close,
 };

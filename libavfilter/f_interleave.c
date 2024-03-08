@@ -23,12 +23,13 @@
  * audio and video interleaver
  */
 
+#include "config_components.h"
+
 #include "libavutil/avassert.h"
 #include "libavutil/avstring.h"
 #include "libavutil/opt.h"
 
 #include "avfilter.h"
-#include "formats.h"
 #include "filters.h"
 #include "internal.h"
 #include "audio.h"
@@ -52,10 +53,10 @@ static const AVOption filt_name##_options[] = {                     \
    { "nb_inputs", "set number of inputs", OFFSET(nb_inputs), AV_OPT_TYPE_INT, {.i64 = 2}, 1, INT_MAX, .flags = flags_ }, \
    { "n",         "set number of inputs", OFFSET(nb_inputs), AV_OPT_TYPE_INT, {.i64 = 2}, 1, INT_MAX, .flags = flags_ }, \
    { "duration", "how to determine the end-of-stream",              \
-       OFFSET(duration_mode), AV_OPT_TYPE_INT, { .i64 = DURATION_LONGEST }, 0,  2, flags_, "duration" }, \
-       { "longest",  "Duration of longest input",  0, AV_OPT_TYPE_CONST, { .i64 = DURATION_LONGEST  }, 0, 0, flags_, "duration" }, \
-       { "shortest", "Duration of shortest input", 0, AV_OPT_TYPE_CONST, { .i64 = DURATION_SHORTEST }, 0, 0, flags_, "duration" }, \
-       { "first",    "Duration of first input",    0, AV_OPT_TYPE_CONST, { .i64 = DURATION_FIRST    }, 0, 0, flags_, "duration" }, \
+       OFFSET(duration_mode), AV_OPT_TYPE_INT, { .i64 = DURATION_LONGEST }, 0,  2, flags_, .unit = "duration" }, \
+       { "longest",  "Duration of longest input",  0, AV_OPT_TYPE_CONST, { .i64 = DURATION_LONGEST  }, 0, 0, flags_, .unit = "duration" }, \
+       { "shortest", "Duration of shortest input", 0, AV_OPT_TYPE_CONST, { .i64 = DURATION_SHORTEST }, 0, 0, flags_, .unit = "duration" }, \
+       { "first",    "Duration of first input",    0, AV_OPT_TYPE_CONST, { .i64 = DURATION_FIRST    }, 0, 0, flags_, .unit = "duration" }, \
    { NULL }                                                         \
 }
 
@@ -167,25 +168,17 @@ static av_cold int init(AVFilterContext *ctx)
 
         switch (outpad->type) {
         case AVMEDIA_TYPE_VIDEO:
-            inpad.get_video_buffer = ff_null_get_video_buffer; break;
+            inpad.get_buffer.video = ff_null_get_video_buffer; break;
         case AVMEDIA_TYPE_AUDIO:
-            inpad.get_audio_buffer = ff_null_get_audio_buffer; break;
+            inpad.get_buffer.audio = ff_null_get_audio_buffer; break;
         default:
             av_assert0(0);
         }
-        if ((ret = ff_insert_inpad(ctx, i, &inpad)) < 0) {
-            av_freep(&inpad.name);
+        if ((ret = ff_append_inpad_free_name(ctx, &inpad)) < 0)
             return ret;
-        }
     }
 
     return 0;
-}
-
-static av_cold void uninit(AVFilterContext *ctx)
-{
-    for (int i = 0; i < ctx->nb_inputs; i++)
-        av_freep(&ctx->input_pads[i].name);
 }
 
 static int config_output(AVFilterLink *outlink)
@@ -235,17 +228,15 @@ static const AVFilterPad interleave_outputs[] = {
         .type          = AVMEDIA_TYPE_VIDEO,
         .config_props  = config_output,
     },
-    { NULL }
 };
 
-AVFilter ff_vf_interleave = {
+const AVFilter ff_vf_interleave = {
     .name        = "interleave",
     .description = NULL_IF_CONFIG_SMALL("Temporally interleave video inputs."),
     .priv_size   = sizeof(InterleaveContext),
     .init        = init,
-    .uninit      = uninit,
     .activate    = activate,
-    .outputs     = interleave_outputs,
+    FILTER_OUTPUTS(interleave_outputs),
     .priv_class  = &interleave_class,
     .flags       = AVFILTER_FLAG_DYNAMIC_INPUTS,
 };
@@ -263,17 +254,15 @@ static const AVFilterPad ainterleave_outputs[] = {
         .type          = AVMEDIA_TYPE_AUDIO,
         .config_props  = config_output,
     },
-    { NULL }
 };
 
-AVFilter ff_af_ainterleave = {
+const AVFilter ff_af_ainterleave = {
     .name        = "ainterleave",
     .description = NULL_IF_CONFIG_SMALL("Temporally interleave audio inputs."),
     .priv_size   = sizeof(InterleaveContext),
     .init        = init,
-    .uninit      = uninit,
     .activate    = activate,
-    .outputs     = ainterleave_outputs,
+    FILTER_OUTPUTS(ainterleave_outputs),
     .priv_class  = &ainterleave_class,
     .flags       = AVFILTER_FLAG_DYNAMIC_INPUTS,
 };

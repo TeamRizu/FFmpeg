@@ -27,7 +27,6 @@
 #define FF_BUFQUEUE_SIZE 129
 #include "bufferqueue.h"
 
-#include "formats.h"
 #include "internal.h"
 #include "video.h"
 
@@ -76,50 +75,43 @@ typedef struct DeflickerContext {
 static const AVOption deflicker_options[] = {
     { "size",  "set how many frames to use",  OFFSET(size), AV_OPT_TYPE_INT, {.i64=5}, 2, SIZE, FLAGS },
     { "s",     "set how many frames to use",  OFFSET(size), AV_OPT_TYPE_INT, {.i64=5}, 2, SIZE, FLAGS },
-    { "mode",  "set how to smooth luminance", OFFSET(mode), AV_OPT_TYPE_INT, {.i64=0}, 0, NB_SMOOTH_MODE-1, FLAGS, "mode" },
-    { "m",     "set how to smooth luminance", OFFSET(mode), AV_OPT_TYPE_INT, {.i64=0}, 0, NB_SMOOTH_MODE-1, FLAGS, "mode" },
-        { "am",      "arithmetic mean", 0, AV_OPT_TYPE_CONST, {.i64=ARITHMETIC_MEAN},  0, 0, FLAGS, "mode" },
-        { "gm",      "geometric mean",  0, AV_OPT_TYPE_CONST, {.i64=GEOMETRIC_MEAN},   0, 0, FLAGS, "mode" },
-        { "hm",      "harmonic mean",   0, AV_OPT_TYPE_CONST, {.i64=HARMONIC_MEAN},    0, 0, FLAGS, "mode" },
-        { "qm",      "quadratic mean",  0, AV_OPT_TYPE_CONST, {.i64=QUADRATIC_MEAN},   0, 0, FLAGS, "mode" },
-        { "cm",      "cubic mean",      0, AV_OPT_TYPE_CONST, {.i64=CUBIC_MEAN},       0, 0, FLAGS, "mode" },
-        { "pm",      "power mean",      0, AV_OPT_TYPE_CONST, {.i64=POWER_MEAN},       0, 0, FLAGS, "mode" },
-        { "median",  "median",          0, AV_OPT_TYPE_CONST, {.i64=MEDIAN},           0, 0, FLAGS, "mode" },
+    { "mode",  "set how to smooth luminance", OFFSET(mode), AV_OPT_TYPE_INT, {.i64=0}, 0, NB_SMOOTH_MODE-1, FLAGS, .unit = "mode" },
+    { "m",     "set how to smooth luminance", OFFSET(mode), AV_OPT_TYPE_INT, {.i64=0}, 0, NB_SMOOTH_MODE-1, FLAGS, .unit = "mode" },
+        { "am",      "arithmetic mean", 0, AV_OPT_TYPE_CONST, {.i64=ARITHMETIC_MEAN},  0, 0, FLAGS, .unit = "mode" },
+        { "gm",      "geometric mean",  0, AV_OPT_TYPE_CONST, {.i64=GEOMETRIC_MEAN},   0, 0, FLAGS, .unit = "mode" },
+        { "hm",      "harmonic mean",   0, AV_OPT_TYPE_CONST, {.i64=HARMONIC_MEAN},    0, 0, FLAGS, .unit = "mode" },
+        { "qm",      "quadratic mean",  0, AV_OPT_TYPE_CONST, {.i64=QUADRATIC_MEAN},   0, 0, FLAGS, .unit = "mode" },
+        { "cm",      "cubic mean",      0, AV_OPT_TYPE_CONST, {.i64=CUBIC_MEAN},       0, 0, FLAGS, .unit = "mode" },
+        { "pm",      "power mean",      0, AV_OPT_TYPE_CONST, {.i64=POWER_MEAN},       0, 0, FLAGS, .unit = "mode" },
+        { "median",  "median",          0, AV_OPT_TYPE_CONST, {.i64=MEDIAN},           0, 0, FLAGS, .unit = "mode" },
     { "bypass", "leave frames unchanged",  OFFSET(bypass), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, FLAGS },
     { NULL }
 };
 
 AVFILTER_DEFINE_CLASS(deflicker);
 
-static int query_formats(AVFilterContext *ctx)
-{
-    static const enum AVPixelFormat pixel_fmts[] = {
-        AV_PIX_FMT_GRAY8, AV_PIX_FMT_GRAY9, AV_PIX_FMT_GRAY10,
-        AV_PIX_FMT_GRAY12, AV_PIX_FMT_GRAY14, AV_PIX_FMT_GRAY16,
-        AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV411P,
-        AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV422P,
-        AV_PIX_FMT_YUV440P, AV_PIX_FMT_YUV444P,
-        AV_PIX_FMT_YUVJ420P, AV_PIX_FMT_YUVJ422P,
-        AV_PIX_FMT_YUVJ440P, AV_PIX_FMT_YUVJ444P,
-        AV_PIX_FMT_YUVJ411P,
-        AV_PIX_FMT_YUV420P9, AV_PIX_FMT_YUV422P9, AV_PIX_FMT_YUV444P9,
-        AV_PIX_FMT_YUV420P10, AV_PIX_FMT_YUV422P10, AV_PIX_FMT_YUV444P10,
-        AV_PIX_FMT_YUV440P10,
-        AV_PIX_FMT_YUV444P12, AV_PIX_FMT_YUV422P12, AV_PIX_FMT_YUV420P12,
-        AV_PIX_FMT_YUV440P12,
-        AV_PIX_FMT_YUV444P14, AV_PIX_FMT_YUV422P14, AV_PIX_FMT_YUV420P14,
-        AV_PIX_FMT_YUV420P16, AV_PIX_FMT_YUV422P16, AV_PIX_FMT_YUV444P16,
-        AV_PIX_FMT_YUVA420P,  AV_PIX_FMT_YUVA422P,   AV_PIX_FMT_YUVA444P,
-        AV_PIX_FMT_YUVA444P9, AV_PIX_FMT_YUVA444P10, AV_PIX_FMT_YUVA444P12, AV_PIX_FMT_YUVA444P16,
-        AV_PIX_FMT_YUVA422P9, AV_PIX_FMT_YUVA422P10, AV_PIX_FMT_YUVA422P12, AV_PIX_FMT_YUVA422P16,
-        AV_PIX_FMT_YUVA420P9, AV_PIX_FMT_YUVA420P10, AV_PIX_FMT_YUVA420P16,
-        AV_PIX_FMT_NONE
-    };
-    AVFilterFormats *formats = ff_make_format_list(pixel_fmts);
-    if (!formats)
-        return AVERROR(ENOMEM);
-    return ff_set_common_formats(ctx, formats);
-}
+static const enum AVPixelFormat pixel_fmts[] = {
+    AV_PIX_FMT_GRAY8, AV_PIX_FMT_GRAY9, AV_PIX_FMT_GRAY10,
+    AV_PIX_FMT_GRAY12, AV_PIX_FMT_GRAY14, AV_PIX_FMT_GRAY16,
+    AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV411P,
+    AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV422P,
+    AV_PIX_FMT_YUV440P, AV_PIX_FMT_YUV444P,
+    AV_PIX_FMT_YUVJ420P, AV_PIX_FMT_YUVJ422P,
+    AV_PIX_FMT_YUVJ440P, AV_PIX_FMT_YUVJ444P,
+    AV_PIX_FMT_YUVJ411P,
+    AV_PIX_FMT_YUV420P9, AV_PIX_FMT_YUV422P9, AV_PIX_FMT_YUV444P9,
+    AV_PIX_FMT_YUV420P10, AV_PIX_FMT_YUV422P10, AV_PIX_FMT_YUV444P10,
+    AV_PIX_FMT_YUV440P10,
+    AV_PIX_FMT_YUV444P12, AV_PIX_FMT_YUV422P12, AV_PIX_FMT_YUV420P12,
+    AV_PIX_FMT_YUV440P12,
+    AV_PIX_FMT_YUV444P14, AV_PIX_FMT_YUV422P14, AV_PIX_FMT_YUV420P14,
+    AV_PIX_FMT_YUV420P16, AV_PIX_FMT_YUV422P16, AV_PIX_FMT_YUV444P16,
+    AV_PIX_FMT_YUVA420P,  AV_PIX_FMT_YUVA422P,   AV_PIX_FMT_YUVA444P,
+    AV_PIX_FMT_YUVA444P9, AV_PIX_FMT_YUVA444P10, AV_PIX_FMT_YUVA444P12, AV_PIX_FMT_YUVA444P16,
+    AV_PIX_FMT_YUVA422P9, AV_PIX_FMT_YUVA422P10, AV_PIX_FMT_YUVA422P12, AV_PIX_FMT_YUVA422P16,
+    AV_PIX_FMT_YUVA420P9, AV_PIX_FMT_YUVA420P10, AV_PIX_FMT_YUVA420P16,
+    AV_PIX_FMT_NONE
+};
 
 static int deflicker8(AVFilterContext *ctx,
                       const uint8_t *src, ptrdiff_t src_linesize,
@@ -454,7 +446,6 @@ static const AVFilterPad inputs[] = {
         .filter_frame = filter_frame,
         .config_props = config_input,
     },
-    { NULL }
 };
 
 static const AVFilterPad outputs[] = {
@@ -463,16 +454,15 @@ static const AVFilterPad outputs[] = {
         .type          = AVMEDIA_TYPE_VIDEO,
         .request_frame = request_frame,
     },
-    { NULL }
 };
 
-AVFilter ff_vf_deflicker = {
+const AVFilter ff_vf_deflicker = {
     .name          = "deflicker",
     .description   = NULL_IF_CONFIG_SMALL("Remove temporal frame luminance variations."),
     .priv_size     = sizeof(DeflickerContext),
     .priv_class    = &deflicker_class,
     .uninit        = uninit,
-    .query_formats = query_formats,
-    .inputs        = inputs,
-    .outputs       = outputs,
+    FILTER_INPUTS(inputs),
+    FILTER_OUTPUTS(outputs),
+    FILTER_PIXFMTS_ARRAY(pixel_fmts),
 };

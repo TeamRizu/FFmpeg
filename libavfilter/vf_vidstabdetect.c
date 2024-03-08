@@ -23,10 +23,13 @@
 #include <vid.stab/libvidstab.h>
 
 #include "libavutil/common.h"
+#include "libavutil/file_open.h"
 #include "libavutil/opt.h"
-#include "libavutil/imgutils.h"
+#include "libavutil/pixdesc.h"
 #include "avfilter.h"
+#include "filters.h"
 #include "internal.h"
+#include "video.h"
 
 #include "vidstabutils.h"
 
@@ -37,6 +40,7 @@ typedef struct StabData {
     VSMotionDetectConfig conf;
 
     char *result;
+    int fileformat;
     FILE *f;
 } StabData;
 
@@ -55,6 +59,11 @@ static const AVOption vidstabdetect_options[] = {
     {"show",        "0: draw nothing; 1,2: show fields and transforms",              OFFSETC(show),              AV_OPT_TYPE_INT,    {.i64 = 0},      0,   2, FLAGS},
     {"tripod",      "virtual tripod mode (if >0): motion is compared to a reference"
                     " reference frame (frame # is the value)",                       OFFSETC(virtualTripod),     AV_OPT_TYPE_INT,    {.i64 = 0}, 0, INT_MAX, FLAGS},
+#ifdef LIBVIDSTAB_FILE_FORMAT_VERSION
+    { "fileformat",   "transforms data file format",  OFFSET(fileformat),  AV_OPT_TYPE_INT,  {.i64 = BINARY_SERIALIZATION_MODE},  ASCII_SERIALIZATION_MODE,  BINARY_SERIALIZATION_MODE,  FLAGS,  .unit = "file_format"},
+    { "ascii",        "ASCII text",  0,  AV_OPT_TYPE_CONST,  {.i64 = ASCII_SERIALIZATION_MODE },  0,  0,  FLAGS,  .unit = "file_format"},
+    { "binary",       "binary",      0,  AV_OPT_TYPE_CONST,  {.i64 = BINARY_SERIALIZATION_MODE},  0,  0,  FLAGS,  .unit = "file_format"},
+#endif
     {NULL}
 };
 
@@ -82,23 +91,6 @@ static av_cold void uninit(AVFilterContext *ctx)
     vsMotionDetectionCleanup(md);
 }
 
-static int query_formats(AVFilterContext *ctx)
-{
-    // If you add something here also add it in vidstabutils.c
-    static const enum AVPixelFormat pix_fmts[] = {
-        AV_PIX_FMT_YUV444P,  AV_PIX_FMT_YUV422P, AV_PIX_FMT_YUV420P,
-        AV_PIX_FMT_YUV411P,  AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUVA420P,
-        AV_PIX_FMT_YUV440P,  AV_PIX_FMT_GRAY8,
-        AV_PIX_FMT_RGB24, AV_PIX_FMT_BGR24, AV_PIX_FMT_RGBA,
-        AV_PIX_FMT_NONE
-    };
-
-    AVFilterFormats *fmts_list = ff_make_format_list(pix_fmts);
-    if (!fmts_list)
-        return AVERROR(ENOMEM);
-    return ff_set_common_formats(ctx, fmts_list);
-}
-
 static int config_input(AVFilterLink *inlink)
 {
     AVFilterContext *ctx = inlink->dst;
@@ -108,6 +100,13 @@ static int config_input(AVFilterLink *inlink)
     VSFrameInfo fi;
     const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(inlink->format);
     int is_planar = desc->flags & AV_PIX_FMT_FLAG_PLANAR;
+    const char *file_mode = "w";
+
+#ifdef LIBVIDSTAB_FILE_FORMAT_VERSION
+    md->serializationMode = s->fileformat;
+    if (s->fileformat == BINARY_SERIALIZATION_MODE)
+        file_mode = "wb";
+#endif
 
     vsFrameInfoInit(&fi, inlink->w, inlink->h,
                     ff_av2vs_pixfmt(ctx, inlink->format));
@@ -143,7 +142,7 @@ static int config_input(AVFilterLink *inlink)
     av_log(ctx, AV_LOG_INFO, "          show = %d\n", s->conf.show);
     av_log(ctx, AV_LOG_INFO, "        result = %s\n", s->result);
 
-    s->f = fopen(s->result, "w");
+    s->f = avpriv_fopen_utf8(s->result, file_mode);
     if (s->f == NULL) {
         av_log(ctx, AV_LOG_ERROR, "cannot open transform file %s\n", s->result);
         return AVERROR(EINVAL);
@@ -165,10 +164,15 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
 
     AVFilterLink *outlink = inlink->dst->outputs[0];
     VSFrame frame;
-    int plane;
+    int plane, ret;
 
-    if (s->conf.show > 0 && !av_frame_is_writable(in))
-        av_frame_make_writable(in);
+    if (s->conf.show > 0 && !av_frame_is_writable(in)) {
+        ret = ff_inlink_make_frame_writable(inlink, &in);
+        if (ret < 0) {
+            av_frame_free(&in);
+            return ret;
+        }
+    }
 
     for (plane = 0; plane < md->fi.planes; plane++) {
         frame.data[plane] = in->data[plane];
@@ -176,7 +180,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     }
     if (vsMotionDetection(md, &localmotions, &frame) != VS_OK) {
         av_log(ctx, AV_LOG_ERROR, "motion detection failed");
-        return AVERROR(AVERROR_EXTERNAL);
+        return AVERROR_EXTERNAL;
     } else {
         if (vsWriteToFile(md, s->f, &localmotions) != VS_OK) {
             int ret = AVERROR(errno);
@@ -196,18 +200,9 @@ static const AVFilterPad avfilter_vf_vidstabdetect_inputs[] = {
         .filter_frame = filter_frame,
         .config_props = config_input,
     },
-    { NULL }
 };
 
-static const AVFilterPad avfilter_vf_vidstabdetect_outputs[] = {
-    {
-        .name = "default",
-        .type = AVMEDIA_TYPE_VIDEO,
-    },
-    { NULL }
-};
-
-AVFilter ff_vf_vidstabdetect = {
+const AVFilter ff_vf_vidstabdetect = {
     .name          = "vidstabdetect",
     .description   = NULL_IF_CONFIG_SMALL("Extract relative transformations, "
                                           "pass 1 of 2 for stabilization "
@@ -215,8 +210,9 @@ AVFilter ff_vf_vidstabdetect = {
     .priv_size     = sizeof(StabData),
     .init          = init,
     .uninit        = uninit,
-    .query_formats = query_formats,
-    .inputs        = avfilter_vf_vidstabdetect_inputs,
-    .outputs       = avfilter_vf_vidstabdetect_outputs,
+    .flags         = AVFILTER_FLAG_METADATA_ONLY,
+    FILTER_INPUTS(avfilter_vf_vidstabdetect_inputs),
+    FILTER_OUTPUTS(ff_video_default_filterpad),
+    FILTER_PIXFMTS_ARRAY(ff_vidstab_pix_fmts),
     .priv_class    = &vidstabdetect_class,
 };

@@ -23,13 +23,10 @@
  * MP test source, ported from MPlayer libmpcodecs/vf_test.c
  */
 
-#include "libavutil/avstring.h"
 #include "libavutil/opt.h"
-#include "libavutil/parseutils.h"
 #include "libavutil/pixdesc.h"
 #include "avfilter.h"
 #include "internal.h"
-#include "formats.h"
 #include "video.h"
 
 #define WIDTH 512
@@ -67,19 +64,19 @@ static const AVOption mptestsrc_options[]= {
     { "duration", "set video duration", OFFSET(duration), AV_OPT_TYPE_DURATION, {.i64 = -1}, -1, INT64_MAX, FLAGS },
     { "d",        "set video duration", OFFSET(duration), AV_OPT_TYPE_DURATION, {.i64 = -1}, -1, INT64_MAX, FLAGS },
 
-    { "test", "set test to perform", OFFSET(test),  AV_OPT_TYPE_INT,   {.i64=TEST_ALL}, 0, INT_MAX, FLAGS, "test" },
-    { "t",    "set test to perform", OFFSET(test),  AV_OPT_TYPE_INT,   {.i64=TEST_ALL}, 0, INT_MAX, FLAGS, "test" },
-        { "dc_luma",     "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_DC_LUMA},     INT_MIN, INT_MAX, FLAGS, "test" },
-        { "dc_chroma",   "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_DC_CHROMA},   INT_MIN, INT_MAX, FLAGS, "test" },
-        { "freq_luma",   "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_FREQ_LUMA},   INT_MIN, INT_MAX, FLAGS, "test" },
-        { "freq_chroma", "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_FREQ_CHROMA}, INT_MIN, INT_MAX, FLAGS, "test" },
-        { "amp_luma",    "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_AMP_LUMA},    INT_MIN, INT_MAX, FLAGS, "test" },
-        { "amp_chroma",  "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_AMP_CHROMA},  INT_MIN, INT_MAX, FLAGS, "test" },
-        { "cbp",         "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_CBP},         INT_MIN, INT_MAX, FLAGS, "test" },
-        { "mv",          "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_MV},          INT_MIN, INT_MAX, FLAGS, "test" },
-        { "ring1",       "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_RING1},       INT_MIN, INT_MAX, FLAGS, "test" },
-        { "ring2",       "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_RING2},       INT_MIN, INT_MAX, FLAGS, "test" },
-        { "all",         "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_ALL},         INT_MIN, INT_MAX, FLAGS, "test" },
+    { "test", "set test to perform", OFFSET(test),  AV_OPT_TYPE_INT,   {.i64=TEST_ALL}, 0, INT_MAX, FLAGS, .unit = "test" },
+    { "t",    "set test to perform", OFFSET(test),  AV_OPT_TYPE_INT,   {.i64=TEST_ALL}, 0, INT_MAX, FLAGS, .unit = "test" },
+        { "dc_luma",     "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_DC_LUMA},     INT_MIN, INT_MAX, FLAGS, .unit = "test" },
+        { "dc_chroma",   "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_DC_CHROMA},   INT_MIN, INT_MAX, FLAGS, .unit = "test" },
+        { "freq_luma",   "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_FREQ_LUMA},   INT_MIN, INT_MAX, FLAGS, .unit = "test" },
+        { "freq_chroma", "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_FREQ_CHROMA}, INT_MIN, INT_MAX, FLAGS, .unit = "test" },
+        { "amp_luma",    "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_AMP_LUMA},    INT_MIN, INT_MAX, FLAGS, .unit = "test" },
+        { "amp_chroma",  "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_AMP_CHROMA},  INT_MIN, INT_MAX, FLAGS, .unit = "test" },
+        { "cbp",         "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_CBP},         INT_MIN, INT_MAX, FLAGS, .unit = "test" },
+        { "mv",          "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_MV},          INT_MIN, INT_MAX, FLAGS, .unit = "test" },
+        { "ring1",       "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_RING1},       INT_MIN, INT_MAX, FLAGS, .unit = "test" },
+        { "ring2",       "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_RING2},       INT_MIN, INT_MAX, FLAGS, .unit = "test" },
+        { "all",         "", 0, AV_OPT_TYPE_CONST, {.i64=TEST_ALL},         INT_MIN, INT_MAX, FLAGS, .unit = "test" },
     { "max_frames", "Set the maximum number of frames generated for each test", OFFSET(max_frames),
         AV_OPT_TYPE_INT64, {.i64 = 30}, 1, INT64_MAX, FLAGS },
     { "m",          "Set the maximum number of frames generated for each test", OFFSET(max_frames),
@@ -286,20 +283,9 @@ static int config_props(AVFilterLink *outlink)
     outlink->w = WIDTH;
     outlink->h = HEIGHT;
     outlink->time_base = av_inv_q(test->frame_rate);
+    outlink->frame_rate = test->frame_rate;
 
     return 0;
-}
-
-static int query_formats(AVFilterContext *ctx)
-{
-    static const enum AVPixelFormat pix_fmts[] = {
-        AV_PIX_FMT_YUV420P, AV_PIX_FMT_NONE
-    };
-
-    AVFilterFormats *fmts_list = ff_make_format_list(pix_fmts);
-    if (!fmts_list)
-        return AVERROR(ENOMEM);
-    return ff_set_common_formats(ctx, fmts_list);
 }
 
 static int request_frame(AVFilterLink *outlink)
@@ -319,6 +305,7 @@ static int request_frame(AVFilterLink *outlink)
     if (!picref)
         return AVERROR(ENOMEM);
     picref->pts = test->pts++;
+    picref->duration = 1;
 
     // clean image
     for (i = 0; i < h; i++)
@@ -354,16 +341,15 @@ static const AVFilterPad mptestsrc_outputs[] = {
         .request_frame = request_frame,
         .config_props  = config_props,
     },
-    { NULL }
 };
 
-AVFilter ff_vsrc_mptestsrc = {
+const AVFilter ff_vsrc_mptestsrc = {
     .name          = "mptestsrc",
     .description   = NULL_IF_CONFIG_SMALL("Generate various test pattern."),
     .priv_size     = sizeof(MPTestContext),
     .priv_class    = &mptestsrc_class,
     .init          = init,
-    .query_formats = query_formats,
     .inputs        = NULL,
-    .outputs       = mptestsrc_outputs,
+    FILTER_OUTPUTS(mptestsrc_outputs),
+    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_YUV420P),
 };

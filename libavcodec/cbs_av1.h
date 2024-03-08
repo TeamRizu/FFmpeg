@@ -130,6 +130,38 @@ typedef struct AV1RawSequenceHeader {
     uint8_t film_grain_params_present;
 } AV1RawSequenceHeader;
 
+typedef struct AV1RawFilmGrainParams {
+    uint8_t  apply_grain;
+    uint16_t grain_seed;
+    uint8_t  update_grain;
+    uint8_t  film_grain_params_ref_idx;
+    uint8_t  num_y_points;
+    uint8_t  point_y_value[14];
+    uint8_t  point_y_scaling[14];
+    uint8_t  chroma_scaling_from_luma;
+    uint8_t  num_cb_points;
+    uint8_t  point_cb_value[10];
+    uint8_t  point_cb_scaling[10];
+    uint8_t  num_cr_points;
+    uint8_t  point_cr_value[10];
+    uint8_t  point_cr_scaling[10];
+    uint8_t  grain_scaling_minus_8;
+    uint8_t  ar_coeff_lag;
+    uint8_t  ar_coeffs_y_plus_128[24];
+    uint8_t  ar_coeffs_cb_plus_128[25];
+    uint8_t  ar_coeffs_cr_plus_128[25];
+    uint8_t  ar_coeff_shift_minus_6;
+    uint8_t  grain_scale_shift;
+    uint8_t  cb_mult;
+    uint8_t  cb_luma_mult;
+    uint16_t cb_offset;
+    uint8_t  cr_mult;
+    uint8_t  cr_luma_mult;
+    uint16_t cr_offset;
+    uint8_t  overlap_flag;
+    uint8_t  clip_to_restricted_range;
+} AV1RawFilmGrainParams;
+
 typedef struct AV1RawFrameHeader {
     uint8_t  show_existing_frame;
     uint8_t  frame_to_show_map_idx;
@@ -183,6 +215,8 @@ typedef struct AV1RawFrameHeader {
     uint8_t uniform_tile_spacing_flag;
     uint8_t tile_cols_log2;
     uint8_t tile_rows_log2;
+    uint8_t tile_start_col_sb[AV1_MAX_TILE_COLS];
+    uint8_t tile_start_row_sb[AV1_MAX_TILE_COLS];
     uint8_t width_in_sbs_minus_1[AV1_MAX_TILE_COLS];
     uint8_t height_in_sbs_minus_1[AV1_MAX_TILE_ROWS];
     uint16_t context_update_tile_id;
@@ -251,35 +285,7 @@ typedef struct AV1RawFrameHeader {
     //AV1RawSubexp gm_params[AV1_TOTAL_REFS_PER_FRAME][6];
     uint32_t gm_params[AV1_TOTAL_REFS_PER_FRAME][6];
 
-    uint8_t  apply_grain;
-    uint16_t grain_seed;
-    uint8_t  update_grain;
-    uint8_t  film_grain_params_ref_idx;
-    uint8_t  num_y_points;
-    uint8_t  point_y_value[14];
-    uint8_t  point_y_scaling[14];
-    uint8_t  chroma_scaling_from_luma;
-    uint8_t  num_cb_points;
-    uint8_t  point_cb_value[10];
-    uint8_t  point_cb_scaling[10];
-    uint8_t  num_cr_points;
-    uint8_t  point_cr_value[10];
-    uint8_t  point_cr_scaling[10];
-    uint8_t  grain_scaling_minus_8;
-    uint8_t  ar_coeff_lag;
-    uint8_t  ar_coeffs_y_plus_128[24];
-    uint8_t  ar_coeffs_cb_plus_128[25];
-    uint8_t  ar_coeffs_cr_plus_128[25];
-    uint8_t  ar_coeff_shift_minus_6;
-    uint8_t  grain_scale_shift;
-    uint8_t  cb_mult;
-    uint8_t  cb_luma_mult;
-    uint16_t cb_offset;
-    uint8_t  cr_mult;
-    uint8_t  cr_luma_mult;
-    uint16_t cr_offset;
-    uint8_t  overlap_flag;
-    uint8_t  clip_to_restricted_range;
+    AV1RawFilmGrainParams film_grain;
 } AV1RawFrameHeader;
 
 typedef struct AV1RawTileData {
@@ -366,6 +372,12 @@ typedef struct AV1RawMetadataTimecode {
     uint32_t time_offset_value;
 } AV1RawMetadataTimecode;
 
+typedef struct AV1RawMetadataUnknown {
+    uint8_t     *payload;
+    AVBufferRef *payload_ref;
+    size_t       payload_size;
+} AV1RawMetadataUnknown;
+
 typedef struct AV1RawMetadata {
     uint64_t metadata_type;
     union {
@@ -374,6 +386,7 @@ typedef struct AV1RawMetadata {
         AV1RawMetadataScalability scalability;
         AV1RawMetadataITUTT35     itut_t35;
         AV1RawMetadataTimecode    timecode;
+        AV1RawMetadataUnknown     unknown;
     } metadata;
 } AV1RawMetadata;
 
@@ -421,8 +434,11 @@ typedef struct AV1ReferenceFrameState {
 } AV1ReferenceFrameState;
 
 typedef struct CodedBitstreamAV1Context {
+    const AVClass *class;
+
     AV1RawSequenceHeader *sequence_header;
-    AVBufferRef          *sequence_header_ref;
+    /** A RefStruct reference backing sequence_header. */
+    AV1RawOBU            *sequence_header_ref;
 
     int     seen_frame_header;
     AVBufferRef *frame_header_ref;
@@ -449,6 +465,13 @@ typedef struct CodedBitstreamAV1Context {
     int tile_num;
 
     AV1ReferenceFrameState ref[AV1_NUM_REF_FRAMES];
+
+    // AVOptions
+    int operating_point;
+    // When writing, fix the length in bytes of the obu_size field.
+    // Writing will fail with an error if an OBU larger than can be
+    // represented by the fixed size is encountered.
+    int fixed_obu_size_length;
 } CodedBitstreamAV1Context;
 
 

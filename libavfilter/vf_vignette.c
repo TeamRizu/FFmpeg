@@ -22,10 +22,8 @@
 
 #include "libavutil/opt.h"
 #include "libavutil/eval.h"
-#include "libavutil/avassert.h"
 #include "libavutil/pixdesc.h"
 #include "avfilter.h"
-#include "formats.h"
 #include "internal.h"
 #include "video.h"
 
@@ -84,12 +82,12 @@ static const AVOption vignette_options[] = {
     { "a",     "set lens angle", OFFSET(angle_expr), AV_OPT_TYPE_STRING, {.str="PI/5"}, .flags = FLAGS },
     { "x0", "set circle center position on x-axis", OFFSET(x0_expr), AV_OPT_TYPE_STRING, {.str="w/2"}, .flags = FLAGS },
     { "y0", "set circle center position on y-axis", OFFSET(y0_expr), AV_OPT_TYPE_STRING, {.str="h/2"}, .flags = FLAGS },
-    { "mode", "set forward/backward mode", OFFSET(backward), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 1, FLAGS, "mode" },
-        { "forward",  NULL, 0, AV_OPT_TYPE_CONST, {.i64 = 0}, INT_MIN, INT_MAX, FLAGS, "mode"},
-        { "backward", NULL, 0, AV_OPT_TYPE_CONST, {.i64 = 1}, INT_MIN, INT_MAX, FLAGS, "mode"},
-    { "eval", "specify when to evaluate expressions", OFFSET(eval_mode), AV_OPT_TYPE_INT, {.i64 = EVAL_MODE_INIT}, 0, EVAL_MODE_NB-1, FLAGS, "eval" },
-         { "init",  "eval expressions once during initialization", 0, AV_OPT_TYPE_CONST, {.i64=EVAL_MODE_INIT},  .flags = FLAGS, .unit = "eval" },
-         { "frame", "eval expressions for each frame",             0, AV_OPT_TYPE_CONST, {.i64=EVAL_MODE_FRAME}, .flags = FLAGS, .unit = "eval" },
+    { "mode", "set forward/backward mode", OFFSET(backward), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 1, FLAGS, .unit = "mode" },
+        { "forward",  NULL, 0, AV_OPT_TYPE_CONST, {.i64 = 0}, INT_MIN, INT_MAX, FLAGS, .unit = "mode"},
+        { "backward", NULL, 0, AV_OPT_TYPE_CONST, {.i64 = 1}, INT_MIN, INT_MAX, FLAGS, .unit = "mode"},
+    { "eval", "specify when to evaluate expressions", OFFSET(eval_mode), AV_OPT_TYPE_INT, {.i64 = EVAL_MODE_INIT}, 0, EVAL_MODE_NB-1, FLAGS, .unit = "eval" },
+        { "init",  "eval expressions once during initialization", 0, AV_OPT_TYPE_CONST, {.i64=EVAL_MODE_INIT},  .flags = FLAGS, .unit = "eval" },
+        { "frame", "eval expressions for each frame",             0, AV_OPT_TYPE_CONST, {.i64=EVAL_MODE_FRAME}, .flags = FLAGS, .unit = "eval" },
     { "dither", "set dithering", OFFSET(do_dither), AV_OPT_TYPE_BOOL, {.i64 = 1}, 0, 1, FLAGS },
     { "aspect", "set aspect ratio", OFFSET(aspect), AV_OPT_TYPE_RATIONAL, {.dbl = 1}, 0, DBL_MAX, .flags = FLAGS },
     { NULL }
@@ -126,21 +124,14 @@ static av_cold void uninit(AVFilterContext *ctx)
     av_expr_free(s->y0_pexpr);
 }
 
-static int query_formats(AVFilterContext *ctx)
-{
-    static const enum AVPixelFormat pix_fmts[] = {
-        AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUV422P,
-        AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV411P,
-        AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV440P,
-        AV_PIX_FMT_RGB24,   AV_PIX_FMT_BGR24,
-        AV_PIX_FMT_GRAY8,
-        AV_PIX_FMT_NONE
-    };
-    AVFilterFormats *fmts_list = ff_make_format_list(pix_fmts);
-    if (!fmts_list)
-        return AVERROR(ENOMEM);
-    return ff_set_common_formats(ctx, fmts_list);
-}
+static const enum AVPixelFormat pix_fmts[] = {
+    AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUV422P,
+    AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV411P,
+    AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV440P,
+    AV_PIX_FMT_RGB24,   AV_PIX_FMT_BGR24,
+    AV_PIX_FMT_GRAY8,
+    AV_PIX_FMT_NONE
+};
 
 static double get_natural_factor(const VignetteContext *s, int x, int y)
 {
@@ -331,26 +322,17 @@ static const AVFilterPad vignette_inputs[] = {
         .filter_frame = filter_frame,
         .config_props = config_props,
     },
-    { NULL }
 };
 
-static const AVFilterPad vignette_outputs[] = {
-    {
-        .name = "default",
-        .type = AVMEDIA_TYPE_VIDEO,
-    },
-    { NULL }
-};
-
-AVFilter ff_vf_vignette = {
+const AVFilter ff_vf_vignette = {
     .name          = "vignette",
     .description   = NULL_IF_CONFIG_SMALL("Make or reverse a vignette effect."),
     .priv_size     = sizeof(VignetteContext),
     .init          = init,
     .uninit        = uninit,
-    .query_formats = query_formats,
-    .inputs        = vignette_inputs,
-    .outputs       = vignette_outputs,
+    FILTER_INPUTS(vignette_inputs),
+    FILTER_OUTPUTS(ff_video_default_filterpad),
+    FILTER_PIXFMTS_ARRAY(pix_fmts),
     .priv_class    = &vignette_class,
     .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC,
 };

@@ -24,10 +24,10 @@
 #ifndef AVFILTER_VOLUME_H
 #define AVFILTER_VOLUME_H
 
-#include "libavutil/common.h"
+#include <stdint.h>
 #include "libavutil/eval.h"
 #include "libavutil/float_dsp.h"
-#include "libavutil/opt.h"
+#include "libavutil/log.h"
 #include "libavutil/samplefmt.h"
 
 enum PrecisionType {
@@ -47,7 +47,9 @@ enum VolumeVarName {
     VAR_NB_CHANNELS,
     VAR_NB_CONSUMED_SAMPLES,
     VAR_NB_SAMPLES,
+#if FF_API_FRAME_PKT
     VAR_POS,
+#endif
     VAR_PTS,
     VAR_SAMPLE_RATE,
     VAR_STARTPTS,

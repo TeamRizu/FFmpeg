@@ -28,6 +28,7 @@
 #include "libavutil/eval.h"
 #include "libavutil/opt.h"
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 
 typedef struct ModPlugContext {
@@ -99,6 +100,14 @@ static const AVOption options[] = {
     {NULL},
 };
 
+static int modplug_read_close(AVFormatContext *s)
+{
+    ModPlugContext *modplug = s->priv_data;
+    ModPlug_Unload(modplug->f);
+    av_freep(&modplug->buf);
+    return 0;
+}
+
 #define SET_OPT_IF_REQUESTED(libopt, opt, flag) do {        \
     if (modplug->opt) {                                     \
         settings.libopt  = modplug->opt;                    \
@@ -168,6 +177,7 @@ static int modplug_read_header(AVFormatContext *s)
     ModPlug_Settings settings;
     ModPlugContext *modplug = s->priv_data;
     int64_t sz = avio_size(pb);
+    int ret;
 
     if (sz < 0) {
         av_log(s, AV_LOG_WARNING, "Could not determine file size\n");
@@ -221,13 +231,15 @@ static int modplug_read_header(AVFormatContext *s)
         return AVERROR_INVALIDDATA;
     }
     st = avformat_new_stream(s, NULL);
-    if (!st)
-        return AVERROR(ENOMEM);
+    if (!st) {
+        ret = AVERROR(ENOMEM);
+        goto fail;
+    }
     avpriv_set_pts_info(st, 64, 1, 1000);
     st->duration = ModPlug_GetLength(modplug->f);
     st->codecpar->codec_type  = AVMEDIA_TYPE_AUDIO;
     st->codecpar->codec_id    = AV_CODEC_ID_PCM_S16LE;
-    st->codecpar->channels    = settings.mChannels;
+    st->codecpar->ch_layout.nb_channels = settings.mChannels;
     st->codecpar->sample_rate = settings.mFrequency;
 
     // timebase = 1/1000, 2ch 16bits 44.1kHz-> 2*2*44100
@@ -235,8 +247,10 @@ static int modplug_read_header(AVFormatContext *s)
 
     if (modplug->video_stream) {
         AVStream *vst = avformat_new_stream(s, NULL);
-        if (!vst)
-            return AVERROR(ENOMEM);
+        if (!vst) {
+            ret = AVERROR(ENOMEM);
+            goto fail;
+        }
         avpriv_set_pts_info(vst, 64, 1, 1000);
         vst->duration = st->duration;
         vst->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
@@ -247,7 +261,13 @@ static int modplug_read_header(AVFormatContext *s)
         modplug->fsize    = modplug->linesize * modplug->h;
     }
 
-    return modplug_load_metadata(s);
+    ret = modplug_load_metadata(s);
+    if (ret < 0)
+        goto fail;
+    return 0;
+fail:
+    modplug_read_close(s);
+    return ret;
 }
 
 static void write_text(uint8_t *dst, const char *s, int linesize, int x, int y)
@@ -332,14 +352,6 @@ static int modplug_read_packet(AVFormatContext *s, AVPacket *pkt)
     return 0;
 }
 
-static int modplug_read_close(AVFormatContext *s)
-{
-    ModPlugContext *modplug = s->priv_data;
-    ModPlug_Unload(modplug->f);
-    av_freep(&modplug->buf);
-    return 0;
-}
-
 static int modplug_read_seek(AVFormatContext *s, int stream_idx, int64_t ts, int flags)
 {
     ModPlugContext *modplug = s->priv_data;
@@ -369,15 +381,15 @@ static const AVClass modplug_class = {
     .version    = LIBAVUTIL_VERSION_INT,
 };
 
-AVInputFormat ff_libmodplug_demuxer = {
-    .name           = "libmodplug",
-    .long_name      = NULL_IF_CONFIG_SMALL("ModPlug demuxer"),
+const FFInputFormat ff_libmodplug_demuxer = {
+    .p.name         = "libmodplug",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("ModPlug demuxer"),
+    .p.extensions   = modplug_extensions,
+    .p.priv_class   = &modplug_class,
     .priv_data_size = sizeof(ModPlugContext),
     .read_probe     = modplug_probe,
     .read_header    = modplug_read_header,
     .read_packet    = modplug_read_packet,
     .read_close     = modplug_read_close,
     .read_seek      = modplug_read_seek,
-    .extensions     = modplug_extensions,
-    .priv_class     = &modplug_class,
 };

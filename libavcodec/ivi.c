@@ -30,11 +30,12 @@
 
 #include "libavutil/attributes.h"
 #include "libavutil/imgutils.h"
+#include "libavutil/thread.h"
 
 #define BITSTREAM_READER_LE
 #include "avcodec.h"
+#include "decode.h"
 #include "get_bits.h"
-#include "internal.h"
 #include "ivi.h"
 #include "ivi_dsp.h"
 
@@ -153,18 +154,15 @@ static int ivi_create_huff_from_desc(const IVIHuffDesc *cb, VLC *vlc, int flag)
     }//for i
 
     /* number of codewords = pos */
-    return init_vlc(vlc, IVI_VLC_BITS, pos, bits, 1, 1, codewords, 2, 2,
-                    (flag ? INIT_VLC_USE_NEW_STATIC : 0) | INIT_VLC_OUTPUT_LE);
+    return vlc_init(vlc, IVI_VLC_BITS, pos, bits, 1, 1, codewords, 2, 2,
+                    (flag ? VLC_INIT_USE_STATIC : 0) | VLC_INIT_OUTPUT_LE);
 }
 
-av_cold void ff_ivi_init_static_vlc(void)
+static av_cold void ivi_init_static_vlc(void)
 {
     int i;
-    static VLC_TYPE table_data[8192 * 16][2];
-    static int initialized_vlcs = 0;
+    static VLCElem table_data[8192 * 16];
 
-    if (initialized_vlcs)
-        return;
     for (i = 0; i < 8; i++) {
         ivi_mb_vlc_tabs[i].table = table_data + i * 2 * 8192;
         ivi_mb_vlc_tabs[i].table_allocated = 8192;
@@ -175,7 +173,12 @@ av_cold void ff_ivi_init_static_vlc(void)
         ivi_create_huff_from_desc(&ivi_blk_huff_desc[i],
                                   &ivi_blk_vlc_tabs[i], 1);
     }
-    initialized_vlcs = 1;
+}
+
+av_cold void ff_ivi_init_static_vlc(void)
+{
+    static AVOnce init_static_once = AV_ONCE_INIT;
+    ff_thread_once(&init_static_once, ivi_init_static_vlc);
 }
 
 /*
@@ -234,7 +237,7 @@ int ff_ivi_dec_huff_desc(GetBitContext *gb, int desc_coded, int which_tab,
             ivi_huff_desc_copy(&huff_tab->cust_desc, &new_huff);
 
             if (huff_tab->cust_tab.table)
-                ff_free_vlc(&huff_tab->cust_tab);
+                ff_vlc_free(&huff_tab->cust_tab);
             result = ivi_create_huff_from_desc(&huff_tab->cust_desc,
                     &huff_tab->cust_tab, 0);
             if (result) {
@@ -265,18 +268,20 @@ static av_cold void ivi_free_buffers(IVIPlaneDesc *planes)
     int p, b, t;
 
     for (p = 0; p < 3; p++) {
-        if (planes[p].bands)
-        for (b = 0; b < planes[p].num_bands; b++) {
-            av_freep(&planes[p].bands[b].bufs[0]);
-            av_freep(&planes[p].bands[b].bufs[1]);
-            av_freep(&planes[p].bands[b].bufs[2]);
-            av_freep(&planes[p].bands[b].bufs[3]);
+        if (planes[p].bands) {
+            for (b = 0; b < planes[p].num_bands; b++) {
+                IVIBandDesc *band = &planes[p].bands[b];
+                av_freep(&band->bufs[0]);
+                av_freep(&band->bufs[1]);
+                av_freep(&band->bufs[2]);
+                av_freep(&band->bufs[3]);
 
-            if (planes[p].bands[b].blk_vlc.cust_tab.table)
-                ff_free_vlc(&planes[p].bands[b].blk_vlc.cust_tab);
-            for (t = 0; t < planes[p].bands[b].num_tiles; t++)
-                av_freep(&planes[p].bands[b].tiles[t].mbs);
-            av_freep(&planes[p].bands[b].tiles);
+                if (band->blk_vlc.cust_tab.table)
+                    ff_vlc_free(&band->blk_vlc.cust_tab);
+                for (t = 0; t < band->num_tiles; t++)
+                    av_freep(&band->tiles[t].mbs);
+                av_freep(&band->tiles);
+            }
         }
         av_freep(&planes[p].bands);
         planes[p].num_bands = 0;
@@ -308,7 +313,7 @@ av_cold int ff_ivi_init_planes(AVCodecContext *avctx, IVIPlaneDesc *planes, cons
     planes[1].num_bands = planes[2].num_bands = cfg->chroma_bands;
 
     for (p = 0; p < 3; p++) {
-        planes[p].bands = av_mallocz_array(planes[p].num_bands, sizeof(IVIBandDesc));
+        planes[p].bands = av_calloc(planes[p].num_bands, sizeof(*planes[p].bands));
         if (!planes[p].bands)
             return AVERROR(ENOMEM);
 
@@ -367,7 +372,7 @@ static int ivi_init_tiles(const IVIBandDesc *band, IVITile *ref_tile,
                                               band->mb_size);
 
             av_freep(&tile->mbs);
-            tile->mbs = av_mallocz_array(tile->num_MBs, sizeof(IVIMbInfo));
+            tile->mbs = av_calloc(tile->num_MBs, sizeof(*tile->mbs));
             if (!tile->mbs)
                 return AVERROR(ENOMEM);
 
@@ -423,7 +428,7 @@ av_cold int ff_ivi_init_tiles(IVIPlaneDesc *planes,
             band->num_tiles = x_tiles * y_tiles;
 
             av_freep(&band->tiles);
-            band->tiles = av_mallocz_array(band->num_tiles, sizeof(IVITile));
+            band->tiles = av_calloc(band->num_tiles, sizeof(*band->tiles));
             if (!band->tiles) {
                 band->num_tiles = 0;
                 return AVERROR(ENOMEM);
@@ -1060,12 +1065,11 @@ static int decode_band(IVI45DecContext *ctx,
     return result;
 }
 
-int ff_ivi_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
-                        AVPacket *avpkt)
+int ff_ivi_decode_frame(AVCodecContext *avctx, AVFrame *frame,
+                        int *got_frame, AVPacket *avpkt)
 {
     IVI45DecContext *ctx = avctx->priv_data;
     const uint8_t   *buf = avpkt->data;
-    AVFrame       *frame = data;
     int             buf_size = avpkt->size;
     int             result, p, b;
 
@@ -1086,7 +1090,7 @@ int ff_ivi_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
 
     if (ctx->is_indeo4 && ctx->frame_type == IVI4_FRAMETYPE_NULL_LAST) {
         if (ctx->got_p_frame) {
-            av_frame_move_ref(data, ctx->p_frame);
+            av_frame_move_ref(frame, ctx->p_frame);
             *got_frame = 1;
             ctx->got_p_frame = 0;
         } else {
@@ -1211,10 +1215,10 @@ av_cold int ff_ivi_decode_close(AVCodecContext *avctx)
     ivi_free_buffers(&ctx->planes[0]);
 
     if (ctx->mb_vlc.cust_tab.table)
-        ff_free_vlc(&ctx->mb_vlc.cust_tab);
+        ff_vlc_free(&ctx->mb_vlc.cust_tab);
 
     if (ctx->blk_vlc.cust_tab.table)
-        ff_free_vlc(&ctx->blk_vlc.cust_tab);
+        ff_vlc_free(&ctx->blk_vlc.cust_tab);
 
     av_frame_free(&ctx->p_frame);
 

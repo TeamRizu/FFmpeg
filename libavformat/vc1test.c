@@ -28,6 +28,7 @@
 
 #include "libavutil/intreadwrite.h"
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 
 #define VC1_EXTRADATA_SIZE 4
@@ -100,7 +101,7 @@ static int vc1t_read_packet(AVFormatContext *s,
     uint32_t pts;
 
     if(avio_feof(pb))
-        return AVERROR(EIO);
+        return AVERROR_EOF;
 
     frame_size = avio_rl24(pb);
     if(avio_r8(pb) & 0x80)
@@ -116,12 +117,12 @@ static int vc1t_read_packet(AVFormatContext *s,
     return pkt->size;
 }
 
-AVInputFormat ff_vc1t_demuxer = {
-    .name           = "vc1test",
-    .long_name      = NULL_IF_CONFIG_SMALL("VC-1 test bitstream"),
+const FFInputFormat ff_vc1t_demuxer = {
+    .p.name         = "vc1test",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("VC-1 test bitstream"),
+    .p.extensions   = "rcv",
+    .p.flags        = AVFMT_GENERIC_INDEX,
     .read_probe     = vc1t_probe,
     .read_header    = vc1t_read_header,
     .read_packet    = vc1t_read_packet,
-    .extensions     = "rcv",
-    .flags          = AVFMT_GENERIC_INDEX,
 };

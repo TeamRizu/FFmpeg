@@ -20,14 +20,10 @@
 
 #include "motion_estimation.h"
 #include "libavcodec/mathops.h"
-#include "libavutil/avassert.h"
 #include "libavutil/common.h"
-#include "libavutil/imgutils.h"
 #include "libavutil/opt.h"
-#include "libavutil/pixdesc.h"
 #include "libavutil/motion_vector.h"
 #include "avfilter.h"
-#include "formats.h"
 #include "internal.h"
 #include "video.h"
 
@@ -48,10 +44,10 @@ typedef struct MEContext {
 
 #define OFFSET(x) offsetof(MEContext, x)
 #define FLAGS AV_OPT_FLAG_VIDEO_PARAM|AV_OPT_FLAG_FILTERING_PARAM
-#define CONST(name, help, val, unit) { name, help, 0, AV_OPT_TYPE_CONST, {.i64=val}, 0, 0, FLAGS, unit }
+#define CONST(name, help, val, u) { name, help, 0, AV_OPT_TYPE_CONST, {.i64=val}, 0, 0, FLAGS, .unit = u }
 
 static const AVOption mestimate_options[] = {
-    { "method", "motion estimation method", OFFSET(method), AV_OPT_TYPE_INT, {.i64 = AV_ME_METHOD_ESA}, AV_ME_METHOD_ESA, AV_ME_METHOD_UMH, FLAGS, "method" },
+    { "method", "motion estimation method", OFFSET(method), AV_OPT_TYPE_INT, {.i64 = AV_ME_METHOD_ESA}, AV_ME_METHOD_ESA, AV_ME_METHOD_UMH, FLAGS, .unit = "method" },
         CONST("esa",   "exhaustive search",                  AV_ME_METHOD_ESA,      "method"),
         CONST("tss",   "three step search",                  AV_ME_METHOD_TSS,      "method"),
         CONST("tdls",  "two dimensional logarithmic search", AV_ME_METHOD_TDLS,     "method"),
@@ -68,25 +64,17 @@ static const AVOption mestimate_options[] = {
 
 AVFILTER_DEFINE_CLASS(mestimate);
 
-static int query_formats(AVFilterContext *ctx)
-{
-    static const enum AVPixelFormat pix_fmts[] = {
-        AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV411P,
-        AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV422P,
-        AV_PIX_FMT_YUV440P, AV_PIX_FMT_YUV444P,
-        AV_PIX_FMT_YUVJ444P, AV_PIX_FMT_YUVJ440P,
-        AV_PIX_FMT_YUVJ422P, AV_PIX_FMT_YUVJ420P,
-        AV_PIX_FMT_YUVJ411P,
-        AV_PIX_FMT_YUVA420P, AV_PIX_FMT_YUVA422P, AV_PIX_FMT_YUVA444P,
-        AV_PIX_FMT_GRAY8,
-        AV_PIX_FMT_NONE
-    };
-
-    AVFilterFormats *fmts_list = ff_make_format_list(pix_fmts);
-    if (!fmts_list)
-        return AVERROR(ENOMEM);
-    return ff_set_common_formats(ctx, fmts_list);
-}
+static const enum AVPixelFormat pix_fmts[] = {
+    AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV411P,
+    AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV422P,
+    AV_PIX_FMT_YUV440P, AV_PIX_FMT_YUV444P,
+    AV_PIX_FMT_YUVJ444P, AV_PIX_FMT_YUVJ440P,
+    AV_PIX_FMT_YUVJ422P, AV_PIX_FMT_YUVJ420P,
+    AV_PIX_FMT_YUVJ411P,
+    AV_PIX_FMT_YUVA420P, AV_PIX_FMT_YUVA422P, AV_PIX_FMT_YUVA444P,
+    AV_PIX_FMT_GRAY8,
+    AV_PIX_FMT_NONE
+};
 
 static int config_input(AVFilterLink *inlink)
 {
@@ -100,8 +88,11 @@ static int config_input(AVFilterLink *inlink)
     s->b_height = inlink->h >> s->log2_mb_size;
     s->b_count = s->b_width * s->b_height;
 
+    if (s->b_count == 0)
+        return AVERROR(EINVAL);
+
     for (i = 0; i < 3; i++) {
-        s->mv_table[i] = av_mallocz_array(s->b_count, sizeof(*s->mv_table[0]));
+        s->mv_table[i] = av_calloc(s->b_count, sizeof(*s->mv_table[0]));
         if (!s->mv_table[i])
             return AVERROR(ENOMEM);
     }
@@ -354,24 +345,16 @@ static const AVFilterPad mestimate_inputs[] = {
         .filter_frame  = filter_frame,
         .config_props  = config_input,
     },
-    { NULL }
 };
 
-static const AVFilterPad mestimate_outputs[] = {
-    {
-        .name          = "default",
-        .type          = AVMEDIA_TYPE_VIDEO,
-    },
-    { NULL }
-};
-
-AVFilter ff_vf_mestimate = {
+const AVFilter ff_vf_mestimate = {
     .name          = "mestimate",
     .description   = NULL_IF_CONFIG_SMALL("Generate motion vectors."),
     .priv_size     = sizeof(MEContext),
     .priv_class    = &mestimate_class,
     .uninit        = uninit,
-    .query_formats = query_formats,
-    .inputs        = mestimate_inputs,
-    .outputs       = mestimate_outputs,
+    .flags         = AVFILTER_FLAG_METADATA_ONLY,
+    FILTER_INPUTS(mestimate_inputs),
+    FILTER_OUTPUTS(ff_video_default_filterpad),
+    FILTER_PIXFMTS_ARRAY(pix_fmts),
 };

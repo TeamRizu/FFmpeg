@@ -1,5 +1,5 @@
-fde8903c4df0ba8235dafcfd8a2f368c *tests/data/fate/rgb24-mkv.matroska
-58216 tests/data/fate/rgb24-mkv.matroska
+7d767e8238c674ecfa80458cb281c09e *tests/data/fate/rgb24-mkv.matroska
+58236 tests/data/fate/rgb24-mkv.matroska
 #tb 0: 1/10
 #media_type 0: video
 #codec_id 0: rawvideo

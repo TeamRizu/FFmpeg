@@ -18,13 +18,54 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include "config_components.h"
+
+#include "libavutil/hdr_dynamic_metadata.h"
+#include "libavutil/film_grain_params.h"
+#include "libavutil/mastering_display_metadata.h"
 #include "libavutil/pixdesc.h"
+#include "libavutil/opt.h"
 #include "avcodec.h"
+#include "av1_parse.h"
 #include "av1dec.h"
+#include "atsc_a53.h"
 #include "bytestream.h"
-#include "hwconfig.h"
+#include "codec_internal.h"
+#include "decode.h"
+#include "hwaccel_internal.h"
 #include "internal.h"
+#include "hwconfig.h"
 #include "profiles.h"
+#include "refstruct.h"
+#include "thread.h"
+
+/**< same with Div_Lut defined in spec 7.11.3.7 */
+static const uint16_t div_lut[AV1_DIV_LUT_NUM] = {
+  16384, 16320, 16257, 16194, 16132, 16070, 16009, 15948, 15888, 15828, 15768,
+  15709, 15650, 15592, 15534, 15477, 15420, 15364, 15308, 15252, 15197, 15142,
+  15087, 15033, 14980, 14926, 14873, 14821, 14769, 14717, 14665, 14614, 14564,
+  14513, 14463, 14413, 14364, 14315, 14266, 14218, 14170, 14122, 14075, 14028,
+  13981, 13935, 13888, 13843, 13797, 13752, 13707, 13662, 13618, 13574, 13530,
+  13487, 13443, 13400, 13358, 13315, 13273, 13231, 13190, 13148, 13107, 13066,
+  13026, 12985, 12945, 12906, 12866, 12827, 12788, 12749, 12710, 12672, 12633,
+  12596, 12558, 12520, 12483, 12446, 12409, 12373, 12336, 12300, 12264, 12228,
+  12193, 12157, 12122, 12087, 12053, 12018, 11984, 11950, 11916, 11882, 11848,
+  11815, 11782, 11749, 11716, 11683, 11651, 11619, 11586, 11555, 11523, 11491,
+  11460, 11429, 11398, 11367, 11336, 11305, 11275, 11245, 11215, 11185, 11155,
+  11125, 11096, 11067, 11038, 11009, 10980, 10951, 10923, 10894, 10866, 10838,
+  10810, 10782, 10755, 10727, 10700, 10673, 10645, 10618, 10592, 10565, 10538,
+  10512, 10486, 10460, 10434, 10408, 10382, 10356, 10331, 10305, 10280, 10255,
+  10230, 10205, 10180, 10156, 10131, 10107, 10082, 10058, 10034, 10010, 9986,
+  9963,  9939,  9916,  9892,  9869,  9846,  9823,  9800,  9777,  9754,  9732,
+  9709,  9687,  9664,  9642,  9620,  9598,  9576,  9554,  9533,  9511,  9489,
+  9468,  9447,  9425,  9404,  9383,  9362,  9341,  9321,  9300,  9279,  9259,
+  9239,  9218,  9198,  9178,  9158,  9138,  9118,  9098,  9079,  9059,  9039,
+  9020,  9001,  8981,  8962,  8943,  8924,  8905,  8886,  8867,  8849,  8830,
+  8812,  8793,  8775,  8756,  8738,  8720,  8702,  8684,  8666,  8648,  8630,
+  8613,  8595,  8577,  8560,  8542,  8525,  8508,  8490,  8473,  8456,  8439,
+  8422,  8405,  8389,  8372,  8355,  8339,  8322,  8306,  8289,  8273,  8257,
+  8240,  8224,  8208,  8192
+};
 
 static uint32_t inverse_recenter(int r, uint32_t v)
 {
@@ -95,8 +136,72 @@ static void read_global_param(AV1DecContext *s, int type, int ref, int idx)
                                        -mx, mx + 1, r) << prec_diff) + round;
 }
 
+static uint64_t round_two(uint64_t x, uint16_t n)
+{
+    if (n == 0)
+        return x;
+    return ((x + ((uint64_t)1 << (n - 1))) >> n);
+}
+
+static int64_t round_two_signed(int64_t x, uint16_t n)
+{
+    return ((x<0) ? -((int64_t)round_two(-x, n)) : (int64_t)round_two(x, n));
+}
+
 /**
-* update gm type/params, since cbs already implemented part of this funcation,
+ * Resolve divisor process.
+ * see spec 7.11.3.7
+ */
+static int16_t resolve_divisor(uint32_t d, uint16_t *shift)
+{
+    int32_t e, f;
+
+    *shift = av_log2(d);
+    e = d - (1 << (*shift));
+    if (*shift > AV1_DIV_LUT_BITS)
+        f = round_two(e, *shift - AV1_DIV_LUT_BITS);
+    else
+        f = e << (AV1_DIV_LUT_BITS - (*shift));
+
+    *shift += AV1_DIV_LUT_PREC_BITS;
+
+    return div_lut[f];
+}
+
+/**
+ * check if global motion params is valid.
+ * see spec 7.11.3.6
+ */
+static uint8_t get_shear_params_valid(AV1DecContext *s, int idx)
+{
+    int16_t alpha, beta, gamma, delta, divf, divs;
+    int64_t v, w;
+    int32_t *param = &s->cur_frame.gm_params[idx][0];
+    if (param[2] <= 0)
+        return 0;
+
+    alpha = av_clip_int16(param[2] - (1 << AV1_WARPEDMODEL_PREC_BITS));
+    beta  = av_clip_int16(param[3]);
+    divf  = resolve_divisor(abs(param[2]), &divs);
+    v     = (int64_t)param[4] * (1 << AV1_WARPEDMODEL_PREC_BITS);
+    w     = (int64_t)param[3] * param[4];
+    gamma = av_clip_int16((int)round_two_signed((v * divf), divs));
+    delta = av_clip_int16(param[5] - (int)round_two_signed((w * divf), divs) - (1 << AV1_WARPEDMODEL_PREC_BITS));
+
+    alpha = round_two_signed(alpha, AV1_WARP_PARAM_REDUCE_BITS) << AV1_WARP_PARAM_REDUCE_BITS;
+    beta  = round_two_signed(beta,  AV1_WARP_PARAM_REDUCE_BITS) << AV1_WARP_PARAM_REDUCE_BITS;
+    gamma = round_two_signed(gamma, AV1_WARP_PARAM_REDUCE_BITS) << AV1_WARP_PARAM_REDUCE_BITS;
+    delta = round_two_signed(delta, AV1_WARP_PARAM_REDUCE_BITS) << AV1_WARP_PARAM_REDUCE_BITS;
+
+    if ((4 * abs(alpha) + 7 * abs(beta)) >= (1 << AV1_WARPEDMODEL_PREC_BITS) ||
+        (4 * abs(gamma) + 4 * abs(delta)) >= (1 << AV1_WARPEDMODEL_PREC_BITS))
+        return 0;
+
+    return 1;
+}
+
+/**
+* update gm type/params, since cbs already implemented part of this function,
 * so we don't need to full implement spec.
 */
 static void global_motion_params(AV1DecContext *s)
@@ -142,6 +247,9 @@ static void global_motion_params(AV1DecContext *s)
             read_global_param(s, type, ref, 0);
             read_global_param(s, type, ref, 1);
         }
+        if (type <= AV1_WARP_MODEL_AFFINE) {
+            s->cur_frame.gm_invalid[ref] = !get_shear_params_valid(s, ref);
+        }
     }
 }
 
@@ -163,7 +271,9 @@ static void skip_mode_params(AV1DecContext *s)
     int second_forward_idx, second_forward_hint;
     int ref_hint, dist, i;
 
-    if (!header->skip_mode_present)
+    if (header->frame_type == AV1_FRAME_KEY ||
+        header->frame_type == AV1_FRAME_INTRA_ONLY ||
+        !header->reference_select || !seq->enable_order_hint)
         return;
 
     forward_idx  = -1;
@@ -247,6 +357,26 @@ static void coded_lossless_param(AV1DecContext *s)
     }
 }
 
+static void load_grain_params(AV1DecContext *s)
+{
+    const AV1RawFrameHeader *header = s->raw_frame_header;
+    const AV1RawFilmGrainParams *film_grain = &header->film_grain, *src;
+    AV1RawFilmGrainParams *dst = &s->cur_frame.film_grain;
+
+    if (!film_grain->apply_grain)
+        return;
+
+    if (film_grain->update_grain) {
+        memcpy(dst, film_grain, sizeof(*dst));
+        return;
+    }
+
+    src = &s->ref[film_grain->film_grain_params_ref_idx].film_grain;
+
+    memcpy(dst, src, sizeof(*dst));
+    dst->grain_seed = film_grain->grain_seed;
+}
+
 static int init_tile_data(AV1DecContext *s)
 
 {
@@ -310,27 +440,20 @@ static int get_tiles_info(AVCodecContext *avctx, const AV1RawTileGroup *tile_gro
 
 }
 
-static int get_pixel_format(AVCodecContext *avctx)
+static enum AVPixelFormat get_sw_pixel_format(void *logctx,
+                                              const AV1RawSequenceHeader *seq)
 {
-    AV1DecContext *s = avctx->priv_data;
-    const AV1RawSequenceHeader *seq = s->raw_seq;
     uint8_t bit_depth;
-    int ret;
     enum AVPixelFormat pix_fmt = AV_PIX_FMT_NONE;
-#define HWACCEL_MAX (CONFIG_AV1_DXVA2_HWACCEL + \
-                     CONFIG_AV1_D3D11VA_HWACCEL * 2 + \
-                     CONFIG_AV1_NVDEC_HWACCEL + \
-                     CONFIG_AV1_VAAPI_HWACCEL)
-    enum AVPixelFormat pix_fmts[HWACCEL_MAX + 2], *fmtp = pix_fmts;
 
     if (seq->seq_profile == 2 && seq->color_config.high_bitdepth)
         bit_depth = seq->color_config.twelve_bit ? 12 : 10;
     else if (seq->seq_profile <= 2)
         bit_depth = seq->color_config.high_bitdepth ? 10 : 8;
     else {
-        av_log(avctx, AV_LOG_ERROR,
+        av_log(logctx, AV_LOG_ERROR,
                "Unknown AV1 profile %d.\n", seq->seq_profile);
-        return -1;
+        return AV_PIX_FMT_NONE;
     }
 
     if (!seq->color_config.mono_chrome) {
@@ -344,7 +467,7 @@ static int get_pixel_format(AVCodecContext *avctx)
             else if (bit_depth == 12)
                 pix_fmt = AV_PIX_FMT_YUV444P12;
             else
-                av_log(avctx, AV_LOG_WARNING, "Unknown AV1 pixel format.\n");
+                av_log(logctx, AV_LOG_WARNING, "Unknown AV1 pixel format.\n");
         } else if (seq->color_config.subsampling_x == 1 &&
                    seq->color_config.subsampling_y == 0) {
             if (bit_depth == 8)
@@ -354,7 +477,7 @@ static int get_pixel_format(AVCodecContext *avctx)
             else if (bit_depth == 12)
                 pix_fmt = AV_PIX_FMT_YUV422P12;
             else
-                av_log(avctx, AV_LOG_WARNING, "Unknown AV1 pixel format.\n");
+                av_log(logctx, AV_LOG_WARNING, "Unknown AV1 pixel format.\n");
         } else if (seq->color_config.subsampling_x == 1 &&
                    seq->color_config.subsampling_y == 1) {
             if (bit_depth == 8)
@@ -364,24 +487,41 @@ static int get_pixel_format(AVCodecContext *avctx)
             else if (bit_depth == 12)
                 pix_fmt = AV_PIX_FMT_YUV420P12;
             else
-                av_log(avctx, AV_LOG_WARNING, "Unknown AV1 pixel format.\n");
+                av_log(logctx, AV_LOG_WARNING, "Unknown AV1 pixel format.\n");
         }
     } else {
-        if (seq->color_config.subsampling_x == 1 &&
-            seq->color_config.subsampling_y == 1)
-            pix_fmt = AV_PIX_FMT_YUV440P;
+        if (bit_depth == 8)
+            pix_fmt = AV_PIX_FMT_GRAY8;
+        else if (bit_depth == 10)
+            pix_fmt = AV_PIX_FMT_GRAY10;
+        else if (bit_depth == 12)
+            pix_fmt = AV_PIX_FMT_GRAY12;
         else
-            av_log(avctx, AV_LOG_WARNING, "Unknown AV1 pixel format.\n");
+            av_log(logctx, AV_LOG_WARNING, "Unknown AV1 pixel format.\n");
     }
 
-    av_log(avctx, AV_LOG_DEBUG, "AV1 decode get format: %s.\n",
-           av_get_pix_fmt_name(pix_fmt));
+    return pix_fmt;
+}
+
+static int get_pixel_format(AVCodecContext *avctx)
+{
+    AV1DecContext *s = avctx->priv_data;
+    const AV1RawSequenceHeader *seq = s->raw_seq;
+    int ret;
+    enum AVPixelFormat pix_fmt = get_sw_pixel_format(avctx, seq);
+#define HWACCEL_MAX (CONFIG_AV1_DXVA2_HWACCEL + \
+                     CONFIG_AV1_D3D11VA_HWACCEL * 2 + \
+                     CONFIG_AV1_D3D12VA_HWACCEL + \
+                     CONFIG_AV1_NVDEC_HWACCEL + \
+                     CONFIG_AV1_VAAPI_HWACCEL + \
+                     CONFIG_AV1_VDPAU_HWACCEL + \
+                     CONFIG_AV1_VULKAN_HWACCEL)
+    enum AVPixelFormat pix_fmts[HWACCEL_MAX + 2], *fmtp = pix_fmts;
 
     if (pix_fmt == AV_PIX_FMT_NONE)
         return -1;
-    s->pix_fmt = pix_fmt;
 
-    switch (s->pix_fmt) {
+    switch (pix_fmt) {
     case AV_PIX_FMT_YUV420P:
 #if CONFIG_AV1_DXVA2_HWACCEL
         *fmtp++ = AV_PIX_FMT_DXVA2_VLD;
@@ -390,11 +530,20 @@ static int get_pixel_format(AVCodecContext *avctx)
         *fmtp++ = AV_PIX_FMT_D3D11VA_VLD;
         *fmtp++ = AV_PIX_FMT_D3D11;
 #endif
+#if CONFIG_AV1_D3D12VA_HWACCEL
+        *fmtp++ = AV_PIX_FMT_D3D12;
+#endif
 #if CONFIG_AV1_NVDEC_HWACCEL
         *fmtp++ = AV_PIX_FMT_CUDA;
 #endif
 #if CONFIG_AV1_VAAPI_HWACCEL
         *fmtp++ = AV_PIX_FMT_VAAPI;
+#endif
+#if CONFIG_AV1_VDPAU_HWACCEL
+        *fmtp++ = AV_PIX_FMT_VDPAU;
+#endif
+#if CONFIG_AV1_VULKAN_HWACCEL
+        *fmtp++ = AV_PIX_FMT_VULKAN;
 #endif
         break;
     case AV_PIX_FMT_YUV420P10:
@@ -405,21 +554,79 @@ static int get_pixel_format(AVCodecContext *avctx)
         *fmtp++ = AV_PIX_FMT_D3D11VA_VLD;
         *fmtp++ = AV_PIX_FMT_D3D11;
 #endif
+#if CONFIG_AV1_D3D12VA_HWACCEL
+        *fmtp++ = AV_PIX_FMT_D3D12;
+#endif
 #if CONFIG_AV1_NVDEC_HWACCEL
         *fmtp++ = AV_PIX_FMT_CUDA;
 #endif
 #if CONFIG_AV1_VAAPI_HWACCEL
         *fmtp++ = AV_PIX_FMT_VAAPI;
 #endif
+#if CONFIG_AV1_VDPAU_HWACCEL
+        *fmtp++ = AV_PIX_FMT_VDPAU;
+#endif
+#if CONFIG_AV1_VULKAN_HWACCEL
+        *fmtp++ = AV_PIX_FMT_VULKAN;
+#endif
+        break;
+    case AV_PIX_FMT_YUV420P12:
+#if CONFIG_AV1_VULKAN_HWACCEL
+        *fmtp++ = AV_PIX_FMT_VULKAN;
+#endif
+        break;
+    case AV_PIX_FMT_YUV422P:
+#if CONFIG_AV1_VULKAN_HWACCEL
+        *fmtp++ = AV_PIX_FMT_VULKAN;
+#endif
+        break;
+    case AV_PIX_FMT_YUV422P10:
+#if CONFIG_AV1_VULKAN_HWACCEL
+        *fmtp++ = AV_PIX_FMT_VULKAN;
+#endif
+        break;
+    case AV_PIX_FMT_YUV422P12:
+#if CONFIG_AV1_VULKAN_HWACCEL
+        *fmtp++ = AV_PIX_FMT_VULKAN;
+#endif
+        break;
+    case AV_PIX_FMT_YUV444P:
+#if CONFIG_AV1_VULKAN_HWACCEL
+        *fmtp++ = AV_PIX_FMT_VULKAN;
+#endif
+        break;
+    case AV_PIX_FMT_YUV444P10:
+#if CONFIG_AV1_VULKAN_HWACCEL
+        *fmtp++ = AV_PIX_FMT_VULKAN;
+#endif
+        break;
+    case AV_PIX_FMT_YUV444P12:
+#if CONFIG_AV1_VULKAN_HWACCEL
+        *fmtp++ = AV_PIX_FMT_VULKAN;
+#endif
+        break;
+    case AV_PIX_FMT_GRAY8:
+#if CONFIG_AV1_NVDEC_HWACCEL
+        *fmtp++ = AV_PIX_FMT_CUDA;
+#endif
+        break;
+    case AV_PIX_FMT_GRAY10:
+#if CONFIG_AV1_NVDEC_HWACCEL
+        *fmtp++ = AV_PIX_FMT_CUDA;
+#endif
         break;
     }
 
-    *fmtp++ = s->pix_fmt;
+    *fmtp++ = pix_fmt;
     *fmtp = AV_PIX_FMT_NONE;
 
-    ret = ff_thread_get_format(avctx, pix_fmts);
-    if (ret < 0)
-        return ret;
+    for (int i = 0; pix_fmts[i] != pix_fmt; i++)
+        if (pix_fmts[i] == avctx->pix_fmt) {
+            s->pix_fmt = pix_fmt;
+            return 1;
+        }
+
+    ret = ff_get_format(avctx, pix_fmts);
 
     /**
      * check if the HW accel is inited correctly. If not, return un-implemented.
@@ -427,26 +634,31 @@ static int get_pixel_format(AVCodecContext *avctx)
      * implemented in the future, need remove this check.
      */
     if (!avctx->hwaccel) {
-        av_log(avctx, AV_LOG_ERROR, "Your platform doesn't suppport"
+        av_log(avctx, AV_LOG_ERROR, "Your platform doesn't support"
                " hardware accelerated AV1 decoding.\n");
+        avctx->pix_fmt = AV_PIX_FMT_NONE;
         return AVERROR(ENOSYS);
     }
 
+    s->pix_fmt = pix_fmt;
     avctx->pix_fmt = ret;
+
+    av_log(avctx, AV_LOG_DEBUG, "AV1 decode get format: %s.\n",
+           av_get_pix_fmt_name(avctx->pix_fmt));
 
     return 0;
 }
 
-static void av1_frame_unref(AVCodecContext *avctx, AV1Frame *f)
+static void av1_frame_unref(AV1Frame *f)
 {
-    ff_thread_release_buffer(avctx, &f->tf);
-    av_buffer_unref(&f->hwaccel_priv_buf);
-    f->hwaccel_picture_private = NULL;
-    av_buffer_unref(&f->header_ref);
+    av_frame_unref(f->f);
+    ff_refstruct_unref(&f->hwaccel_picture_private);
+    ff_refstruct_unref(&f->header_ref);
     f->raw_frame_header = NULL;
     f->spatial_id = f->temporal_id = 0;
     memset(f->skip_mode_frame_idx, 0,
            2 * sizeof(uint8_t));
+    memset(&f->film_grain, 0, sizeof(f->film_grain));
     f->coded_lossless = 0;
 }
 
@@ -454,25 +666,25 @@ static int av1_frame_ref(AVCodecContext *avctx, AV1Frame *dst, const AV1Frame *s
 {
     int ret;
 
-    ret = ff_thread_ref_frame(&dst->tf, &src->tf);
-    if (ret < 0)
-        return ret;
-
-    dst->header_ref = av_buffer_ref(src->header_ref);
-    if (!dst->header_ref)
-        goto fail;
+    ff_refstruct_replace(&dst->header_ref, src->header_ref);
 
     dst->raw_frame_header = src->raw_frame_header;
 
-    if (src->hwaccel_picture_private) {
-        dst->hwaccel_priv_buf = av_buffer_ref(src->hwaccel_priv_buf);
-        if (!dst->hwaccel_priv_buf)
-            goto fail;
-        dst->hwaccel_picture_private = dst->hwaccel_priv_buf->data;
-    }
+    if (!src->f->buf[0])
+        return 0;
+
+    ret = av_frame_ref(dst->f, src->f);
+    if (ret < 0)
+        goto fail;
+
+    ff_refstruct_replace(&dst->hwaccel_picture_private,
+                          src->hwaccel_picture_private);
 
     dst->spatial_id = src->spatial_id;
     dst->temporal_id = src->temporal_id;
+    memcpy(dst->gm_invalid,
+           src->gm_invalid,
+           AV1_NUM_REF_FRAMES * sizeof(uint8_t));
     memcpy(dst->gm_type,
            src->gm_type,
            AV1_NUM_REF_FRAMES * sizeof(uint8_t));
@@ -482,29 +694,43 @@ static int av1_frame_ref(AVCodecContext *avctx, AV1Frame *dst, const AV1Frame *s
     memcpy(dst->skip_mode_frame_idx,
            src->skip_mode_frame_idx,
            2 * sizeof(uint8_t));
+    memcpy(&dst->film_grain,
+           &src->film_grain,
+           sizeof(dst->film_grain));
     dst->coded_lossless = src->coded_lossless;
 
     return 0;
 
 fail:
-    av1_frame_unref(avctx, dst);
+    av1_frame_unref(dst);
     return AVERROR(ENOMEM);
 }
 
 static av_cold int av1_decode_free(AVCodecContext *avctx)
 {
     AV1DecContext *s = avctx->priv_data;
+    AV1RawMetadataITUTT35 itut_t35;
 
     for (int i = 0; i < FF_ARRAY_ELEMS(s->ref); i++) {
-        av1_frame_unref(avctx, &s->ref[i]);
-        av_frame_free(&s->ref[i].tf.f);
+        if (s->ref[i].f) {
+            av1_frame_unref(&s->ref[i]);
+            av_frame_free(&s->ref[i].f);
+        }
     }
-    av1_frame_unref(avctx, &s->cur_frame);
-    av_frame_free(&s->cur_frame.tf.f);
-
-    av_buffer_unref(&s->seq_ref);
-    av_buffer_unref(&s->header_ref);
+    if (s->cur_frame.f) {
+        av1_frame_unref(&s->cur_frame);
+        av_frame_free(&s->cur_frame.f);
+    }
+    av_buffer_unref(&s->seq_data_ref);
+    ff_refstruct_unref(&s->seq_ref);
+    ff_refstruct_unref(&s->header_ref);
+    ff_refstruct_unref(&s->cll_ref);
+    ff_refstruct_unref(&s->mdcv_ref);
     av_freep(&s->tile_group_info);
+
+    while (s->itut_t35_fifo && av_fifo_read(s->itut_t35_fifo, &itut_t35, 1) >= 0)
+        av_buffer_unref(&itut_t35.payload_ref);
+    av_fifo_freep2(&s->itut_t35_fifo);
 
     ff_cbs_fragment_free(&s->current_obu);
     ff_cbs_close(&s->cbc);
@@ -524,7 +750,7 @@ static int set_context_with_sequence(AVCodecContext *avctx,
     avctx->color_range =
         seq->color_config.color_range ? AVCOL_RANGE_JPEG : AVCOL_RANGE_MPEG;
     avctx->color_primaries = seq->color_config.color_primaries;
-    avctx->colorspace = seq->color_config.color_primaries;
+    avctx->colorspace = seq->color_config.matrix_coefficients;
     avctx->color_trc = seq->color_config.transfer_characteristics;
 
     switch (seq->color_config.chroma_sample_position) {
@@ -536,22 +762,24 @@ static int set_context_with_sequence(AVCodecContext *avctx,
         break;
     }
 
+    if (seq->film_grain_params_present)
+        avctx->properties |= FF_CODEC_PROPERTY_FILM_GRAIN;
+    else
+        avctx->properties &= ~FF_CODEC_PROPERTY_FILM_GRAIN;
+
     if (avctx->width != width || avctx->height != height) {
         int ret = ff_set_dimensions(avctx, width, height);
         if (ret < 0)
             return ret;
     }
-    avctx->sample_aspect_ratio = (AVRational) { 1, 1 };
 
-    if (seq->timing_info.num_units_in_display_tick &&
-        seq->timing_info.time_scale) {
-        av_reduce(&avctx->framerate.den, &avctx->framerate.num,
-                  seq->timing_info.num_units_in_display_tick,
-                  seq->timing_info.time_scale,
-                  INT_MAX);
-        if (seq->timing_info.equal_picture_interval)
-            avctx->ticks_per_frame = seq->timing_info.num_ticks_per_picture_minus_1 + 1;
-    }
+    if (seq->timing_info_present_flag)
+        avctx->framerate = ff_av1_framerate(1LL + seq->timing_info.num_ticks_per_picture_minus_1,
+                                            seq->timing_info.num_units_in_display_tick,
+                                            seq->timing_info.time_scale);
+
+    if (avctx->pix_fmt == AV_PIX_FMT_NONE)
+        avctx->pix_fmt = get_sw_pixel_format(avctx, seq);
 
     return 0;
 }
@@ -586,6 +814,16 @@ static int update_context_with_frame_header(AVCodecContext *avctx,
     return 0;
 }
 
+static const CodedBitstreamUnitType decompose_unit_types[] = {
+    AV1_OBU_FRAME,
+    AV1_OBU_FRAME_HEADER,
+    AV1_OBU_METADATA,
+    AV1_OBU_REDUNDANT_FRAME_HEADER,
+    AV1_OBU_SEQUENCE_HEADER,
+    AV1_OBU_TEMPORAL_DELIMITER,
+    AV1_OBU_TILE_GROUP,
+};
+
 static av_cold int av1_decode_init(AVCodecContext *avctx)
 {
     AV1DecContext *s = avctx->priv_data;
@@ -593,27 +831,32 @@ static av_cold int av1_decode_init(AVCodecContext *avctx)
     int ret;
 
     s->avctx = avctx;
+    s->pkt = avctx->internal->in_pkt;
     s->pix_fmt = AV_PIX_FMT_NONE;
 
     for (int i = 0; i < FF_ARRAY_ELEMS(s->ref); i++) {
-        s->ref[i].tf.f = av_frame_alloc();
-        if (!s->ref[i].tf.f) {
-            av_log(avctx, AV_LOG_ERROR,
-                   "Failed to allocate reference frame buffer %d.\n", i);
+        s->ref[i].f = av_frame_alloc();
+        if (!s->ref[i].f)
             return AVERROR(ENOMEM);
-        }
     }
 
-    s->cur_frame.tf.f = av_frame_alloc();
-    if (!s->cur_frame.tf.f) {
-        av_log(avctx, AV_LOG_ERROR,
-               "Failed to allocate current frame buffer.\n");
+    s->cur_frame.f = av_frame_alloc();
+    if (!s->cur_frame.f)
         return AVERROR(ENOMEM);
-    }
 
     ret = ff_cbs_init(&s->cbc, AV_CODEC_ID_AV1, avctx);
     if (ret < 0)
         return ret;
+
+    s->cbc->decompose_unit_types    = decompose_unit_types;
+    s->cbc->nb_decompose_unit_types = FF_ARRAY_ELEMS(decompose_unit_types);
+
+    s->itut_t35_fifo = av_fifo_alloc2(1, sizeof(AV1RawMetadataITUTT35),
+                                      AV_FIFO_FLAG_AUTO_GROW);
+    if (!s->itut_t35_fifo)
+        return AVERROR(ENOMEM);
+
+    av_opt_set_int(s->cbc->priv_data, "operating_point", s->operating_point, 0);
 
     if (avctx->extradata && avctx->extradata_size) {
         ret = ff_cbs_read_extradata_from_codec(s->cbc,
@@ -621,7 +864,7 @@ static av_cold int av1_decode_init(AVCodecContext *avctx)
                                                avctx);
         if (ret < 0) {
             av_log(avctx, AV_LOG_WARNING, "Failed to read extradata.\n");
-            return ret;
+            goto end;
         }
 
         seq = ((CodedBitstreamAV1Context *)(s->cbc->priv_data))->sequence_header;
@@ -650,23 +893,20 @@ static int av1_frame_alloc(AVCodecContext *avctx, AV1Frame *f)
     AVFrame *frame;
     int ret;
 
-    f->header_ref = av_buffer_ref(s->header_ref);
-    if (!f->header_ref)
-        return AVERROR(ENOMEM);
-
-    f->raw_frame_header = s->raw_frame_header;
-
     ret = update_context_with_frame_header(avctx, header);
     if (ret < 0) {
         av_log(avctx, AV_LOG_ERROR, "Failed to update context with frame header\n");
         return ret;
     }
 
-    if ((ret = ff_thread_get_buffer(avctx, &f->tf, AV_GET_BUFFER_FLAG_REF)) < 0)
-        return ret;
+    if ((ret = ff_thread_get_buffer(avctx, f->f, AV_GET_BUFFER_FLAG_REF)) < 0)
+        goto fail;
 
-    frame = f->tf.f;
-    frame->key_frame = header->frame_type == AV1_FRAME_KEY;
+    frame = f->f;
+    if (header->frame_type == AV1_FRAME_KEY)
+        frame->flags |= AV_FRAME_FLAG_KEY;
+    else
+        frame->flags &= ~AV_FRAME_FLAG_KEY;
 
     switch (header->frame_type) {
     case AV1_FRAME_KEY:
@@ -681,39 +921,219 @@ static int av1_frame_alloc(AVCodecContext *avctx, AV1Frame *f)
         break;
     }
 
-    if (avctx->hwaccel) {
-        const AVHWAccel *hwaccel = avctx->hwaccel;
-        if (hwaccel->frame_priv_data_size) {
-            f->hwaccel_priv_buf =
-                av_buffer_allocz(hwaccel->frame_priv_data_size);
-            if (!f->hwaccel_priv_buf)
-                goto fail;
-            f->hwaccel_picture_private = f->hwaccel_priv_buf->data;
-        }
-    }
+    ret = ff_hwaccel_frame_priv_alloc(avctx, &f->hwaccel_picture_private);
+    if (ret < 0)
+        goto fail;
+
     return 0;
 
 fail:
-    av1_frame_unref(avctx, f);
-    return AVERROR(ENOMEM);
+    av1_frame_unref(f);
+    return ret;
 }
 
-static int set_output_frame(AVCodecContext *avctx, AVFrame *frame,
-                            const AVPacket *pkt, int *got_frame)
+static int export_itut_t35(AVCodecContext *avctx, AVFrame *frame,
+                           const AV1RawMetadataITUTT35 *itut_t35)
+{
+    GetByteContext gb;
+    int ret, provider_code;
+
+    bytestream2_init(&gb, itut_t35->payload, itut_t35->payload_size);
+
+    provider_code = bytestream2_get_be16(&gb);
+    switch (provider_code) {
+    case 0x31: { // atsc_provider_code
+        uint32_t user_identifier = bytestream2_get_be32(&gb);
+        switch (user_identifier) {
+        case MKBETAG('G', 'A', '9', '4'): { // closed captions
+            AVBufferRef *buf = NULL;
+
+            ret = ff_parse_a53_cc(&buf, gb.buffer, bytestream2_get_bytes_left(&gb));
+            if (ret < 0)
+                return ret;
+            if (!ret)
+                break;
+
+            if (!av_frame_new_side_data_from_buf(frame, AV_FRAME_DATA_A53_CC, buf))
+                av_buffer_unref(&buf);
+
+            avctx->properties |= FF_CODEC_PROPERTY_CLOSED_CAPTIONS;
+            break;
+        }
+        default: // ignore unsupported identifiers
+            break;
+        }
+        break;
+    }
+    case 0x3C: { // smpte_provider_code
+        AVDynamicHDRPlus *hdrplus;
+        int provider_oriented_code = bytestream2_get_be16(&gb);
+        int application_identifier = bytestream2_get_byte(&gb);
+
+        if (itut_t35->itu_t_t35_country_code != 0xB5 ||
+            provider_oriented_code != 1 || application_identifier != 4)
+            break;
+
+        hdrplus = av_dynamic_hdr_plus_create_side_data(frame);
+        if (!hdrplus)
+            return AVERROR(ENOMEM);
+
+        ret = av_dynamic_hdr_plus_from_t35(hdrplus, gb.buffer,
+                                           bytestream2_get_bytes_left(&gb));
+        if (ret < 0)
+            return ret;
+        break;
+    }
+    default: // ignore unsupported provider codes
+        break;
+    }
+
+    return 0;
+}
+
+static int export_metadata(AVCodecContext *avctx, AVFrame *frame)
 {
     AV1DecContext *s = avctx->priv_data;
-    const AVFrame *srcframe = s->cur_frame.tf.f;
+    AV1RawMetadataITUTT35 itut_t35;
+    int ret = 0;
+
+    if (s->mdcv) {
+        AVMasteringDisplayMetadata *mastering = av_mastering_display_metadata_create_side_data(frame);
+        if (!mastering)
+            return AVERROR(ENOMEM);
+
+        for (int i = 0; i < 3; i++) {
+            mastering->display_primaries[i][0] = av_make_q(s->mdcv->primary_chromaticity_x[i], 1 << 16);
+            mastering->display_primaries[i][1] = av_make_q(s->mdcv->primary_chromaticity_y[i], 1 << 16);
+        }
+        mastering->white_point[0] = av_make_q(s->mdcv->white_point_chromaticity_x, 1 << 16);
+        mastering->white_point[1] = av_make_q(s->mdcv->white_point_chromaticity_y, 1 << 16);
+
+        mastering->max_luminance = av_make_q(s->mdcv->luminance_max, 1 << 8);
+        mastering->min_luminance = av_make_q(s->mdcv->luminance_min, 1 << 14);
+
+        mastering->has_primaries = 1;
+        mastering->has_luminance = 1;
+    }
+
+    if (s->cll) {
+        AVContentLightMetadata *light = av_content_light_metadata_create_side_data(frame);
+        if (!light)
+            return AVERROR(ENOMEM);
+
+        light->MaxCLL = s->cll->max_cll;
+        light->MaxFALL = s->cll->max_fall;
+    }
+
+    while (av_fifo_read(s->itut_t35_fifo, &itut_t35, 1) >= 0) {
+        if (ret >= 0)
+            ret = export_itut_t35(avctx, frame, &itut_t35);
+        av_buffer_unref(&itut_t35.payload_ref);
+    }
+
+    return ret;
+}
+
+static int export_film_grain(AVCodecContext *avctx, AVFrame *frame)
+{
+    AV1DecContext *s = avctx->priv_data;
+    const AV1RawFilmGrainParams *film_grain = &s->cur_frame.film_grain;
+    AVFilmGrainParams *fgp;
+    AVFilmGrainAOMParams *aom;
+
+    if (!film_grain->apply_grain)
+        return 0;
+
+    fgp = av_film_grain_params_create_side_data(frame);
+    if (!fgp)
+        return AVERROR(ENOMEM);
+
+    fgp->type = AV_FILM_GRAIN_PARAMS_AV1;
+    fgp->seed = film_grain->grain_seed;
+
+    aom = &fgp->codec.aom;
+    aom->chroma_scaling_from_luma = film_grain->chroma_scaling_from_luma;
+    aom->scaling_shift = film_grain->grain_scaling_minus_8 + 8;
+    aom->ar_coeff_lag = film_grain->ar_coeff_lag;
+    aom->ar_coeff_shift = film_grain->ar_coeff_shift_minus_6 + 6;
+    aom->grain_scale_shift = film_grain->grain_scale_shift;
+    aom->overlap_flag = film_grain->overlap_flag;
+    aom->limit_output_range = film_grain->clip_to_restricted_range;
+
+    aom->num_y_points = film_grain->num_y_points;
+    for (int i = 0; i < film_grain->num_y_points; i++) {
+        aom->y_points[i][0] = film_grain->point_y_value[i];
+        aom->y_points[i][1] = film_grain->point_y_scaling[i];
+    }
+    aom->num_uv_points[0] = film_grain->num_cb_points;
+    for (int i = 0; i < film_grain->num_cb_points; i++) {
+        aom->uv_points[0][i][0] = film_grain->point_cb_value[i];
+        aom->uv_points[0][i][1] = film_grain->point_cb_scaling[i];
+    }
+    aom->num_uv_points[1] = film_grain->num_cr_points;
+    for (int i = 0; i < film_grain->num_cr_points; i++) {
+        aom->uv_points[1][i][0] = film_grain->point_cr_value[i];
+        aom->uv_points[1][i][1] = film_grain->point_cr_scaling[i];
+    }
+
+    for (int i = 0; i < 24; i++) {
+        aom->ar_coeffs_y[i] = film_grain->ar_coeffs_y_plus_128[i] - 128;
+    }
+    for (int i = 0; i < 25; i++) {
+        aom->ar_coeffs_uv[0][i] = film_grain->ar_coeffs_cb_plus_128[i] - 128;
+        aom->ar_coeffs_uv[1][i] = film_grain->ar_coeffs_cr_plus_128[i] - 128;
+    }
+
+    aom->uv_mult[0] = film_grain->cb_mult;
+    aom->uv_mult[1] = film_grain->cr_mult;
+    aom->uv_mult_luma[0] = film_grain->cb_luma_mult;
+    aom->uv_mult_luma[1] = film_grain->cr_luma_mult;
+    aom->uv_offset[0] = film_grain->cb_offset;
+    aom->uv_offset[1] = film_grain->cr_offset;
+
+    return 0;
+}
+
+static int set_output_frame(AVCodecContext *avctx, AVFrame *frame)
+{
+    AV1DecContext *s = avctx->priv_data;
+    const AVFrame *srcframe = s->cur_frame.f;
+    AVPacket *pkt = s->pkt;
     int ret;
+
+    // TODO: all layers
+    if (s->operating_point_idc &&
+        av_log2(s->operating_point_idc >> 8) > s->cur_frame.spatial_id)
+        return 0;
 
     ret = av_frame_ref(frame, srcframe);
     if (ret < 0)
         return ret;
 
+    ret = export_metadata(avctx, frame);
+    if (ret < 0) {
+        av_frame_unref(frame);
+        return ret;
+    }
+
+    if (avctx->export_side_data & AV_CODEC_EXPORT_DATA_FILM_GRAIN) {
+        ret = export_film_grain(avctx, frame);
+        if (ret < 0) {
+            av_frame_unref(frame);
+            return ret;
+        }
+    }
+
     frame->pts = pkt->pts;
     frame->pkt_dts = pkt->dts;
+#if FF_API_FRAME_PKT
+FF_DISABLE_DEPRECATION_WARNINGS
     frame->pkt_size = pkt->size;
+    frame->pkt_pos = pkt->pos;
+FF_ENABLE_DEPRECATION_WARNINGS
+#endif
 
-    *got_frame = 1;
+    av_packet_unref(pkt);
 
     return 0;
 }
@@ -726,8 +1146,7 @@ static int update_reference_list(AVCodecContext *avctx)
 
     for (int i = 0; i < AV1_NUM_REF_FRAMES; i++) {
         if (header->refresh_frame_flags & (1 << i)) {
-            if (s->ref[i].tf.f->buf[0])
-                av1_frame_unref(avctx, &s->ref[i]);
+            av1_frame_unref(&s->ref[i]);
             if ((ret = av1_frame_ref(avctx, &s->ref[i], &s->cur_frame)) < 0) {
                 av_log(avctx, AV_LOG_ERROR,
                        "Failed to update frame %d in reference list\n", i);
@@ -743,8 +1162,42 @@ static int get_current_frame(AVCodecContext *avctx)
     AV1DecContext *s = avctx->priv_data;
     int ret;
 
-    if (s->cur_frame.tf.f->buf[0])
-        av1_frame_unref(avctx, &s->cur_frame);
+    av1_frame_unref(&s->cur_frame);
+
+    s->cur_frame.header_ref = ff_refstruct_ref(s->header_ref);
+
+    s->cur_frame.raw_frame_header = s->raw_frame_header;
+
+    ret = init_tile_data(s);
+    if (ret < 0) {
+        av_log(avctx, AV_LOG_ERROR, "Failed to init tile data.\n");
+        return ret;
+    }
+
+    if ((avctx->skip_frame >= AVDISCARD_NONINTRA &&
+            (s->raw_frame_header->frame_type != AV1_FRAME_KEY &&
+             s->raw_frame_header->frame_type != AV1_FRAME_INTRA_ONLY)) ||
+        (avctx->skip_frame >= AVDISCARD_NONKEY   &&
+             s->raw_frame_header->frame_type != AV1_FRAME_KEY) ||
+        avctx->skip_frame >= AVDISCARD_ALL)
+        return 0;
+
+    if (s->pix_fmt == AV_PIX_FMT_NONE) {
+        ret = get_pixel_format(avctx);
+        if (ret < 0) {
+            av_log(avctx, AV_LOG_ERROR, "Failed to get pixel format.\n");
+            return ret;
+        }
+
+        if (!ret && FF_HW_HAS_CB(avctx, decode_params)) {
+            ret = FF_HW_CALL(avctx, decode_params, AV1_OBU_SEQUENCE_HEADER,
+                             s->seq_data_ref->data, s->seq_data_ref->size);
+            if (ret < 0) {
+                av_log(avctx, AV_LOG_ERROR, "HW accel decode params fail.\n");
+                return ret;
+            }
+        }
+    }
 
     ret = av1_frame_alloc(avctx, &s->cur_frame);
     if (ret < 0) {
@@ -753,53 +1206,47 @@ static int get_current_frame(AVCodecContext *avctx)
         return ret;
     }
 
-    ret = init_tile_data(s);
-    if (ret < 0) {
-        av_log(avctx, AV_LOG_ERROR, "Failed to init tile data.\n");
-        return ret;
-    }
-
     global_motion_params(s);
     skip_mode_params(s);
     coded_lossless_param(s);
+    load_grain_params(s);
 
     return ret;
 }
 
-static int av1_decode_frame(AVCodecContext *avctx, void *frame,
-                            int *got_frame, AVPacket *pkt)
+static int av1_receive_frame_internal(AVCodecContext *avctx, AVFrame *frame)
 {
     AV1DecContext *s = avctx->priv_data;
     AV1RawTileGroup *raw_tile_group = NULL;
-    int ret;
+    int i = 0, ret;
 
-    ret = ff_cbs_read_packet(s->cbc, &s->current_obu, pkt);
-    if (ret < 0) {
-        av_log(avctx, AV_LOG_ERROR, "Failed to read packet.\n");
-        goto end;
-    }
-    av_log(avctx, AV_LOG_DEBUG, "Total obu for this frame:%d.\n",
-           s->current_obu.nb_units);
-
-    for (int i = 0; i < s->current_obu.nb_units; i++) {
+    for (i = s->nb_unit; i < s->current_obu.nb_units; i++) {
         CodedBitstreamUnit *unit = &s->current_obu.units[i];
         AV1RawOBU *obu = unit->content;
         const AV1RawOBUHeader *header;
+
+        av_log(avctx, AV_LOG_DEBUG, "OBU idx:%d, type:%d, content available:%d.\n", i, unit->type, !!obu);
+
+        if (unit->type == AV1_OBU_TILE_LIST) {
+            av_log(avctx, AV_LOG_ERROR, "Large scale tile decoding is unsupported.\n");
+            ret = AVERROR_PATCHWELCOME;
+            goto end;
+        }
 
         if (!obu)
             continue;
 
         header = &obu->header;
-        av_log(avctx, AV_LOG_DEBUG, "Obu idx:%d, obu type:%d.\n", i, unit->type);
 
         switch (unit->type) {
         case AV1_OBU_SEQUENCE_HEADER:
-            av_buffer_unref(&s->seq_ref);
-            s->seq_ref = av_buffer_ref(unit->content_ref);
-            if (!s->seq_ref) {
-                ret = AVERROR(ENOMEM);
+            ret = av_buffer_replace(&s->seq_data_ref, unit->data_ref);
+            if (ret < 0)
                 goto end;
-            }
+
+            s->seq_data_ref->data = unit->data;
+            s->seq_data_ref->size = unit->data_size;
+            ff_refstruct_replace(&s->seq_ref, unit->content_ref);
 
             s->raw_seq = &obu->obu.sequence_header;
 
@@ -810,25 +1257,10 @@ static int av1_decode_frame(AVCodecContext *avctx, void *frame,
                 goto end;
             }
 
-            if (s->pix_fmt == AV_PIX_FMT_NONE) {
-                ret = get_pixel_format(avctx);
-                if (ret < 0) {
-                    av_log(avctx, AV_LOG_ERROR,
-                           "Failed to get pixel format.\n");
-                    s->raw_seq = NULL;
-                    goto end;
-                }
-            }
+            s->operating_point_idc = s->raw_seq->operating_point_idc[s->operating_point];
 
-            if (avctx->hwaccel && avctx->hwaccel->decode_params) {
-                ret = avctx->hwaccel->decode_params(avctx, unit->type, unit->data,
-                                                    unit->data_size);
-                if (ret < 0) {
-                    av_log(avctx, AV_LOG_ERROR, "HW accel decode params fail.\n");
-                    s->raw_seq = NULL;
-                    goto end;
-                }
-            }
+            s->pix_fmt = AV_PIX_FMT_NONE;
+
             break;
         case AV1_OBU_REDUNDANT_FRAME_HEADER:
             if (s->raw_frame_header)
@@ -842,12 +1274,7 @@ static int av1_decode_frame(AVCodecContext *avctx, void *frame,
                 goto end;
             }
 
-            av_buffer_unref(&s->header_ref);
-            s->header_ref = av_buffer_ref(unit->content_ref);
-            if (!s->header_ref) {
-                ret = AVERROR(ENOMEM);
-                goto end;
-            }
+            ff_refstruct_replace(&s->header_ref, unit->content_ref);
 
             if (unit->type == AV1_OBU_FRAME)
                 s->raw_frame_header = &obu->obu.frame.header;
@@ -855,8 +1282,7 @@ static int av1_decode_frame(AVCodecContext *avctx, void *frame,
                 s->raw_frame_header = &obu->obu.frame_header;
 
             if (s->raw_frame_header->show_existing_frame) {
-                if (s->cur_frame.tf.f->buf[0])
-                    av1_frame_unref(avctx, &s->cur_frame);
+                av1_frame_unref(&s->cur_frame);
 
                 ret = av1_frame_ref(avctx, &s->cur_frame,
                                     &s->ref[s->raw_frame_header->frame_to_show_map_idx]);
@@ -871,11 +1297,14 @@ static int av1_decode_frame(AVCodecContext *avctx, void *frame,
                     goto end;
                 }
 
-                ret = set_output_frame(avctx, frame, pkt, got_frame);
-                if (ret < 0)
-                    av_log(avctx, AV_LOG_ERROR, "Set output frame error.\n");
+                if (s->cur_frame.f->buf[0]) {
+                    ret = set_output_frame(avctx, frame);
+                    if (ret < 0)
+                        av_log(avctx, AV_LOG_ERROR, "Set output frame error.\n");
+                }
 
                 s->raw_frame_header = NULL;
+                i++;
 
                 goto end;
             }
@@ -889,9 +1318,8 @@ static int av1_decode_frame(AVCodecContext *avctx, void *frame,
             s->cur_frame.spatial_id  = header->spatial_id;
             s->cur_frame.temporal_id = header->temporal_id;
 
-            if (avctx->hwaccel) {
-                ret = avctx->hwaccel->start_frame(avctx, unit->data,
-                                                  unit->data_size);
+            if (avctx->hwaccel && s->cur_frame.f->buf[0]) {
+                ret = FF_HW_CALL(avctx, start_frame, unit->data, unit->data_size);
                 if (ret < 0) {
                     av_log(avctx, AV_LOG_ERROR, "HW accel start frame fail.\n");
                     goto end;
@@ -916,10 +1344,9 @@ static int av1_decode_frame(AVCodecContext *avctx, void *frame,
             if (ret < 0)
                 goto end;
 
-            if (avctx->hwaccel) {
-                ret = avctx->hwaccel->decode_slice(avctx,
-                                                   raw_tile_group->tile_data.data,
-                                                   raw_tile_group->tile_data.data_size);
+            if (avctx->hwaccel && s->cur_frame.f->buf[0]) {
+                ret = FF_HW_CALL(avctx, decode_slice, raw_tile_group->tile_data.data,
+                                 raw_tile_group->tile_data.data_size);
                 if (ret < 0) {
                     av_log(avctx, AV_LOG_ERROR,
                            "HW accel decode slice fail.\n");
@@ -930,7 +1357,35 @@ static int av1_decode_frame(AVCodecContext *avctx, void *frame,
         case AV1_OBU_TILE_LIST:
         case AV1_OBU_TEMPORAL_DELIMITER:
         case AV1_OBU_PADDING:
+            break;
         case AV1_OBU_METADATA:
+            switch (obu->obu.metadata.metadata_type) {
+            case AV1_METADATA_TYPE_HDR_CLL:
+                ff_refstruct_replace(&s->cll_ref, unit->content_ref);
+                s->cll = &obu->obu.metadata.metadata.hdr_cll;
+                break;
+            case AV1_METADATA_TYPE_HDR_MDCV:
+                ff_refstruct_replace(&s->mdcv_ref, unit->content_ref);
+                s->mdcv = &obu->obu.metadata.metadata.hdr_mdcv;
+                break;
+            case AV1_METADATA_TYPE_ITUT_T35: {
+                AV1RawMetadataITUTT35 itut_t35;
+                memcpy(&itut_t35, &obu->obu.metadata.metadata.itut_t35, sizeof(itut_t35));
+                itut_t35.payload_ref = av_buffer_ref(obu->obu.metadata.metadata.itut_t35.payload_ref);
+                if (!itut_t35.payload_ref) {
+                    ret = AVERROR(ENOMEM);
+                    goto end;
+                }
+                ret = av_fifo_write(s->itut_t35_fifo, &itut_t35, 1);
+                if (ret < 0) {
+                    av_buffer_unref(&itut_t35.payload_ref);
+                    goto end;
+                }
+                break;
+            }
+            default:
+                break;
+            }
             break;
         default:
             av_log(avctx, AV_LOG_DEBUG,
@@ -939,8 +1394,9 @@ static int av1_decode_frame(AVCodecContext *avctx, void *frame,
         }
 
         if (raw_tile_group && (s->tile_num == raw_tile_group->tg_end + 1)) {
-            if (avctx->hwaccel) {
-                ret = avctx->hwaccel->end_frame(avctx);
+            int show_frame = s->raw_frame_header->show_frame;
+            if (avctx->hwaccel && s->cur_frame.f->buf[0]) {
+                ret = FF_HW_SIMPLE_CALL(avctx, end_frame);
                 if (ret < 0) {
                     av_log(avctx, AV_LOG_ERROR, "HW accel end frame fail.\n");
                     goto end;
@@ -953,8 +1409,8 @@ static int av1_decode_frame(AVCodecContext *avctx, void *frame,
                 goto end;
             }
 
-            if (s->raw_frame_header->show_frame) {
-                ret = set_output_frame(avctx, frame, pkt, got_frame);
+            if (s->raw_frame_header->show_frame && s->cur_frame.f->buf[0]) {
+                ret = set_output_frame(avctx, frame);
                 if (ret < 0) {
                     av_log(avctx, AV_LOG_ERROR, "Set output frame error\n");
                     goto end;
@@ -962,46 +1418,116 @@ static int av1_decode_frame(AVCodecContext *avctx, void *frame,
             }
             raw_tile_group = NULL;
             s->raw_frame_header = NULL;
+            if (show_frame) {
+                i++;
+                goto end;
+            }
         }
     }
 
+    ret = AVERROR(EAGAIN);
 end:
-    ff_cbs_fragment_reset(&s->current_obu);
-    if (ret < 0)
-        s->raw_frame_header = NULL;
+    av_assert0(i <= s->current_obu.nb_units);
+    s->nb_unit = i;
+
+    if ((ret < 0 && ret != AVERROR(EAGAIN)) || s->current_obu.nb_units == i) {
+        if (ret < 0)
+            s->raw_frame_header = NULL;
+        av_packet_unref(s->pkt);
+        ff_cbs_fragment_reset(&s->current_obu);
+        s->nb_unit = 0;
+    }
+    if (!ret && !frame->buf[0])
+        ret = AVERROR(EAGAIN);
+
+    return ret;
+}
+
+static int av1_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+{
+    AV1DecContext *s = avctx->priv_data;
+    int ret;
+
+    do {
+        if (!s->current_obu.nb_units) {
+            ret = ff_decode_get_packet(avctx, s->pkt);
+            if (ret < 0)
+                return ret;
+
+            ret = ff_cbs_read_packet(s->cbc, &s->current_obu, s->pkt);
+            if (ret < 0) {
+                ff_cbs_fragment_reset(&s->current_obu);
+                av_packet_unref(s->pkt);
+                av_log(avctx, AV_LOG_ERROR, "Failed to read packet.\n");
+                return ret;
+            }
+
+            s->nb_unit = 0;
+            av_log(avctx, AV_LOG_DEBUG, "Total OBUs on this packet: %d.\n",
+                   s->current_obu.nb_units);
+        }
+
+        ret = av1_receive_frame_internal(avctx, frame);
+    } while (ret == AVERROR(EAGAIN));
+
     return ret;
 }
 
 static void av1_decode_flush(AVCodecContext *avctx)
 {
     AV1DecContext *s = avctx->priv_data;
+    AV1RawMetadataITUTT35 itut_t35;
 
     for (int i = 0; i < FF_ARRAY_ELEMS(s->ref); i++)
-        av1_frame_unref(avctx, &s->ref[i]);
+        av1_frame_unref(&s->ref[i]);
 
-    av1_frame_unref(avctx, &s->cur_frame);
+    av1_frame_unref(&s->cur_frame);
+    s->operating_point_idc = 0;
+    s->nb_unit = 0;
     s->raw_frame_header = NULL;
     s->raw_seq = NULL;
+    s->cll = NULL;
+    s->mdcv = NULL;
+    while (av_fifo_read(s->itut_t35_fifo, &itut_t35, 1) >= 0)
+        av_buffer_unref(&itut_t35.payload_ref);
 
+    ff_cbs_fragment_reset(&s->current_obu);
     ff_cbs_flush(s->cbc);
+
+    if (FF_HW_HAS_CB(avctx, flush))
+        FF_HW_SIMPLE_CALL(avctx, flush);
 }
 
-AVCodec ff_av1_decoder = {
-    .name                  = "av1",
-    .long_name             = NULL_IF_CONFIG_SMALL("Alliance for Open Media AV1"),
-    .type                  = AVMEDIA_TYPE_VIDEO,
-    .id                    = AV_CODEC_ID_AV1,
+#define OFFSET(x) offsetof(AV1DecContext, x)
+#define VD AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_DECODING_PARAM
+static const AVOption av1_options[] = {
+    { "operating_point",  "Select an operating point of the scalable bitstream",
+                          OFFSET(operating_point), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, AV1_MAX_OPERATING_POINTS - 1, VD },
+    { NULL }
+};
+
+static const AVClass av1_class = {
+    .class_name = "AV1 decoder",
+    .item_name  = av_default_item_name,
+    .option     = av1_options,
+    .version    = LIBAVUTIL_VERSION_INT,
+};
+
+const FFCodec ff_av1_decoder = {
+    .p.name                = "av1",
+    CODEC_LONG_NAME("Alliance for Open Media AV1"),
+    .p.type                = AVMEDIA_TYPE_VIDEO,
+    .p.id                  = AV_CODEC_ID_AV1,
     .priv_data_size        = sizeof(AV1DecContext),
     .init                  = av1_decode_init,
     .close                 = av1_decode_free,
-    .decode                = av1_decode_frame,
-    .capabilities          = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_AVOID_PROBING,
-    .caps_internal         = FF_CODEC_CAP_INIT_THREADSAFE |
-                             FF_CODEC_CAP_INIT_CLEANUP |
-                             FF_CODEC_CAP_SETS_PKT_DTS,
+    FF_CODEC_RECEIVE_FRAME_CB(av1_receive_frame),
+    .p.capabilities        = AV_CODEC_CAP_DR1,
+    .caps_internal         = FF_CODEC_CAP_INIT_CLEANUP | FF_CODEC_CAP_SKIP_FRAME_FILL_PARAM,
     .flush                 = av1_decode_flush,
-    .profiles              = NULL_IF_CONFIG_SMALL(ff_av1_profiles),
-    .hw_configs            = (const AVCodecHWConfigInternal * []) {
+    .p.profiles            = NULL_IF_CONFIG_SMALL(ff_av1_profiles),
+    .p.priv_class          = &av1_class,
+    .hw_configs            = (const AVCodecHWConfigInternal *const []) {
 #if CONFIG_AV1_DXVA2_HWACCEL
         HWACCEL_DXVA2(av1),
 #endif
@@ -1011,12 +1537,22 @@ AVCodec ff_av1_decoder = {
 #if CONFIG_AV1_D3D11VA2_HWACCEL
         HWACCEL_D3D11VA2(av1),
 #endif
+#if CONFIG_AV1_D3D12VA_HWACCEL
+        HWACCEL_D3D12VA(av1),
+#endif
 #if CONFIG_AV1_NVDEC_HWACCEL
         HWACCEL_NVDEC(av1),
 #endif
 #if CONFIG_AV1_VAAPI_HWACCEL
         HWACCEL_VAAPI(av1),
 #endif
+#if CONFIG_AV1_VDPAU_HWACCEL
+        HWACCEL_VDPAU(av1),
+#endif
+#if CONFIG_AV1_VULKAN_HWACCEL
+        HWACCEL_VULKAN(av1),
+#endif
+
         NULL
     },
 };

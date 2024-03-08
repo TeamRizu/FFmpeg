@@ -21,7 +21,6 @@
  * video scene change detection filter
  */
 
-#include "libavutil/avassert.h"
 #include "libavutil/imgutils.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
@@ -30,6 +29,7 @@
 #include "avfilter.h"
 #include "filters.h"
 #include "scene_sad.h"
+#include "video.h"
 
 typedef struct SCDetContext {
     const AVClass *class;
@@ -60,26 +60,18 @@ static const AVOption scdet_options[] = {
 
 AVFILTER_DEFINE_CLASS(scdet);
 
-static int query_formats(AVFilterContext *ctx)
-{
-    static const enum AVPixelFormat pix_fmts[] = {
-            AV_PIX_FMT_RGB24, AV_PIX_FMT_BGR24, AV_PIX_FMT_RGBA,
-            AV_PIX_FMT_ABGR, AV_PIX_FMT_BGRA, AV_PIX_FMT_GRAY8,
-            AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUVJ420P,
-            AV_PIX_FMT_YUV422P, AV_PIX_FMT_YUVJ422P,
-            AV_PIX_FMT_YUV440P, AV_PIX_FMT_YUVJ440P,
-            AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUVJ444P,
-            AV_PIX_FMT_YUV420P9, AV_PIX_FMT_YUV420P10, AV_PIX_FMT_YUV420P12,
-            AV_PIX_FMT_YUV422P9, AV_PIX_FMT_YUV422P10, AV_PIX_FMT_YUV422P12,
-            AV_PIX_FMT_YUV444P9, AV_PIX_FMT_YUV444P10, AV_PIX_FMT_YUV444P12,
-            AV_PIX_FMT_NONE
-    };
-
-    AVFilterFormats *fmts_list = ff_make_format_list(pix_fmts);
-    if (!fmts_list)
-        return AVERROR(ENOMEM);
-    return ff_set_common_formats(ctx, fmts_list);
-}
+static const enum AVPixelFormat pix_fmts[] = {
+        AV_PIX_FMT_RGB24, AV_PIX_FMT_BGR24, AV_PIX_FMT_RGBA,
+        AV_PIX_FMT_ABGR, AV_PIX_FMT_BGRA, AV_PIX_FMT_GRAY8,
+        AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUVJ420P,
+        AV_PIX_FMT_YUV422P, AV_PIX_FMT_YUVJ422P,
+        AV_PIX_FMT_YUV440P, AV_PIX_FMT_YUVJ440P,
+        AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUVJ444P,
+        AV_PIX_FMT_YUV420P9, AV_PIX_FMT_YUV420P10, AV_PIX_FMT_YUV420P12,
+        AV_PIX_FMT_YUV422P9, AV_PIX_FMT_YUV422P10, AV_PIX_FMT_YUV422P12,
+        AV_PIX_FMT_YUV444P9, AV_PIX_FMT_YUV444P10, AV_PIX_FMT_YUV444P12,
+        AV_PIX_FMT_NONE
+};
 
 static int config_input(AVFilterLink *inlink)
 {
@@ -134,7 +126,6 @@ static double get_scene_score(AVFilterContext *ctx, AVFrame *frame)
             count += s->width[plane] * s->height[plane];
         }
 
-        emms_c();
         mafd = (double)sad * 100. / count / (1ULL << s->bitdepth);
         diff = fabs(mafd - s->prev_mafd);
         ret  = av_clipf(FFMIN(mafd, diff), 0, 100.);
@@ -172,14 +163,14 @@ static int activate(AVFilterContext *ctx)
         snprintf(buf, sizeof(buf), "%0.3f", s->scene_score);
         set_meta(s, frame, "lavfi.scd.score", buf);
 
-        if (s->scene_score > s->threshold) {
+        if (s->scene_score >= s->threshold) {
             av_log(s, AV_LOG_INFO, "lavfi.scd.score: %.3f, lavfi.scd.time: %s\n",
                     s->scene_score, av_ts2timestr(frame->pts, &inlink->time_base));
             set_meta(s, frame, "lavfi.scd.time",
                     av_ts2timestr(frame->pts, &inlink->time_base));
         }
         if (s->sc_pass) {
-            if (s->scene_score > s->threshold)
+            if (s->scene_score >= s->threshold)
                 return ff_filter_frame(outlink, frame);
             else {
                 av_frame_free(&frame);
@@ -200,25 +191,17 @@ static const AVFilterPad scdet_inputs[] = {
         .type         = AVMEDIA_TYPE_VIDEO,
         .config_props = config_input,
     },
-    { NULL }
 };
 
-static const AVFilterPad scdet_outputs[] = {
-    {
-        .name          = "default",
-        .type          = AVMEDIA_TYPE_VIDEO,
-    },
-    { NULL }
-};
-
-AVFilter ff_vf_scdet = {
+const AVFilter ff_vf_scdet = {
     .name          = "scdet",
     .description   = NULL_IF_CONFIG_SMALL("Detect video scene change"),
     .priv_size     = sizeof(SCDetContext),
     .priv_class    = &scdet_class,
     .uninit        = uninit,
-    .query_formats = query_formats,
-    .inputs        = scdet_inputs,
-    .outputs       = scdet_outputs,
+    .flags         = AVFILTER_FLAG_METADATA_ONLY,
+    FILTER_INPUTS(scdet_inputs),
+    FILTER_OUTPUTS(ff_video_default_filterpad),
+    FILTER_PIXFMTS_ARRAY(pix_fmts),
     .activate      = activate,
 };

@@ -26,8 +26,10 @@
  * @sa http://wiki.multimedia.cx/index.php?title=Vivo
  */
 
+#include "libavutil/avstring.h"
 #include "libavutil/parseutils.h"
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 
 typedef struct VivoContext {
@@ -120,7 +122,7 @@ static int vivo_get_packet_header(AVFormatContext *s)
 static int vivo_read_header(AVFormatContext *s)
 {
     VivoContext *vivo = s->priv_data;
-    AVRational fps = { 1, 25};
+    AVRational fps = { 0 };
     AVStream *ast, *vst;
     unsigned char *line, *line_end, *key, *value;
     long value_int;
@@ -206,17 +208,21 @@ static int vivo_read_header(AVFormatContext *s)
                     return AVERROR_INVALIDDATA;
                 value_used = 1;
             } else if (!strcmp(key, "FPS")) {
-                AVRational tmp;
+                double d;
+                if (av_sscanf(value, "%f", &d) != 1)
+                    return AVERROR_INVALIDDATA;
 
                 value_used = 1;
-                if (!av_parse_ratio(&tmp, value, 10000, AV_LOG_WARNING, s))
-                    fps = av_inv_q(tmp);
+                if (!fps.num && !fps.den)
+                    fps = av_inv_q(av_d2q(d, 10000));
             }
 
             if (!value_used)
                 av_dict_set(&s->metadata, key, value, 0);
         }
     }
+    if (!fps.num || !fps.den)
+        fps = (AVRational){ 1, 25 };
 
     avpriv_set_pts_info(ast, 64, 1, ast->codecpar->sample_rate);
     avpriv_set_pts_info(vst, 64, fps.num, fps.den);
@@ -244,7 +250,7 @@ static int vivo_read_header(AVFormatContext *s)
     ast->start_time        = 0;
     ast->codecpar->codec_tag  = 0;
     ast->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
-    ast->codecpar->channels = 1;
+    ast->codecpar->ch_layout.nb_channels = 1;
 
     return 0;
 }
@@ -309,12 +315,12 @@ restart:
     return ret;
 }
 
-AVInputFormat ff_vivo_demuxer = {
-    .name           = "vivo",
-    .long_name      = NULL_IF_CONFIG_SMALL("Vivo"),
+const FFInputFormat ff_vivo_demuxer = {
+    .p.name         = "vivo",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("Vivo"),
+    .p.extensions   = "viv",
     .priv_data_size = sizeof(VivoContext),
     .read_probe     = vivo_probe,
     .read_header    = vivo_read_header,
     .read_packet    = vivo_read_packet,
-    .extensions     = "viv",
 };

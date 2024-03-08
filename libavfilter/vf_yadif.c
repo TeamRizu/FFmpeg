@@ -19,15 +19,10 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include "libavutil/avassert.h"
-#include "libavutil/cpu.h"
 #include "libavutil/common.h"
 #include "libavutil/pixdesc.h"
-#include "libavutil/imgutils.h"
 #include "avfilter.h"
-#include "formats.h"
 #include "internal.h"
-#include "video.h"
 #include "yadif.h"
 
 typedef struct ThreadData {
@@ -123,20 +118,22 @@ static void filter_edges(void *dst1, void *prev1, void *cur1, void *next1,
     uint8_t *next2 = parity ? cur  : next;
 
     const int edge = MAX_ALIGN - 1;
+    int offset = FFMAX(w - edge, 3);
 
     /* Only edge pixels need to be processed here.  A constant value of false
      * for is_not_edge should let the compiler ignore the whole branch. */
-    FILTER(0, 3, 0)
+    FILTER(0, FFMIN(3, w), 0)
 
-    dst  = (uint8_t*)dst1  + w - edge;
-    prev = (uint8_t*)prev1 + w - edge;
-    cur  = (uint8_t*)cur1  + w - edge;
-    next = (uint8_t*)next1 + w - edge;
+    dst  = (uint8_t*)dst1  + offset;
+    prev = (uint8_t*)prev1 + offset;
+    cur  = (uint8_t*)cur1  + offset;
+    next = (uint8_t*)next1 + offset;
     prev2 = (uint8_t*)(parity ? prev : cur);
     next2 = (uint8_t*)(parity ? cur  : next);
 
-    FILTER(w - edge, w - 3, 1)
-    FILTER(w - 3, w, 0)
+    FILTER(offset, w - 3, 1)
+    offset = FFMAX(offset, w - 3);
+    FILTER(offset, w, 0)
 }
 
 
@@ -170,21 +167,23 @@ static void filter_edges_16bit(void *dst1, void *prev1, void *cur1, void *next1,
     uint16_t *next2 = parity ? cur  : next;
 
     const int edge = MAX_ALIGN / 2 - 1;
+    int offset = FFMAX(w - edge, 3);
 
     mrefs /= 2;
     prefs /= 2;
 
-    FILTER(0, 3, 0)
+    FILTER(0,  FFMIN(3, w), 0)
 
-    dst   = (uint16_t*)dst1  + w - edge;
-    prev  = (uint16_t*)prev1 + w - edge;
-    cur   = (uint16_t*)cur1  + w - edge;
-    next  = (uint16_t*)next1 + w - edge;
+    dst   = (uint16_t*)dst1  + offset;
+    prev  = (uint16_t*)prev1 + offset;
+    cur   = (uint16_t*)cur1  + offset;
+    next  = (uint16_t*)next1 + offset;
     prev2 = (uint16_t*)(parity ? prev : cur);
     next2 = (uint16_t*)(parity ? cur  : next);
 
-    FILTER(w - edge, w - 3, 1)
-    FILTER(w - 3, w, 0)
+    FILTER(offset, w - 3, 1)
+    offset = FFMAX(offset, w - 3);
+    FILTER(offset, w, 0)
 }
 
 static int filter_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
@@ -247,65 +246,38 @@ static void filter(AVFilterContext *ctx, AVFrame *dstpic,
         td.h       = h;
         td.plane   = i;
 
-        ctx->internal->execute(ctx, filter_slice, &td, NULL, FFMIN(h, ff_filter_get_nb_threads(ctx)));
+        ff_filter_execute(ctx, filter_slice, &td, NULL,
+                          FFMIN(h, ff_filter_get_nb_threads(ctx)));
     }
-
-    emms_c();
 }
 
-static av_cold void uninit(AVFilterContext *ctx)
-{
-    YADIFContext *yadif = ctx->priv;
-
-    av_frame_free(&yadif->prev);
-    av_frame_free(&yadif->cur );
-    av_frame_free(&yadif->next);
-}
-
-static int query_formats(AVFilterContext *ctx)
-{
-    static const enum AVPixelFormat pix_fmts[] = {
-        AV_PIX_FMT_YUV420P,   AV_PIX_FMT_YUV422P,   AV_PIX_FMT_YUV444P,
-        AV_PIX_FMT_YUV410P,   AV_PIX_FMT_YUV411P,   AV_PIX_FMT_YUV440P,
-        AV_PIX_FMT_GRAY8,     AV_PIX_FMT_GRAY16,
-        AV_PIX_FMT_YUVJ420P,  AV_PIX_FMT_YUVJ422P,  AV_PIX_FMT_YUVJ444P,
-        AV_PIX_FMT_YUVJ440P,
-        AV_PIX_FMT_YUV420P9,  AV_PIX_FMT_YUV422P9,  AV_PIX_FMT_YUV444P9,
-        AV_PIX_FMT_YUV420P10, AV_PIX_FMT_YUV422P10, AV_PIX_FMT_YUV444P10,
-        AV_PIX_FMT_YUV420P12, AV_PIX_FMT_YUV422P12, AV_PIX_FMT_YUV444P12,
-        AV_PIX_FMT_YUV420P14, AV_PIX_FMT_YUV422P14, AV_PIX_FMT_YUV444P14,
-        AV_PIX_FMT_YUV420P16, AV_PIX_FMT_YUV422P16, AV_PIX_FMT_YUV444P16,
-        AV_PIX_FMT_YUVA420P,  AV_PIX_FMT_YUVA422P,  AV_PIX_FMT_YUVA444P,
-        AV_PIX_FMT_GBRP,      AV_PIX_FMT_GBRP9,     AV_PIX_FMT_GBRP10,
-        AV_PIX_FMT_GBRP12,    AV_PIX_FMT_GBRP14,    AV_PIX_FMT_GBRP16,
-        AV_PIX_FMT_GBRAP,
-        AV_PIX_FMT_NONE
-    };
-
-    AVFilterFormats *fmts_list = ff_make_format_list(pix_fmts);
-    if (!fmts_list)
-        return AVERROR(ENOMEM);
-    return ff_set_common_formats(ctx, fmts_list);
-}
+static const enum AVPixelFormat pix_fmts[] = {
+    AV_PIX_FMT_YUV420P,   AV_PIX_FMT_YUV422P,   AV_PIX_FMT_YUV444P,
+    AV_PIX_FMT_YUV410P,   AV_PIX_FMT_YUV411P,   AV_PIX_FMT_YUV440P,
+    AV_PIX_FMT_GRAY8,     AV_PIX_FMT_GRAY16,
+    AV_PIX_FMT_YUVJ420P,  AV_PIX_FMT_YUVJ422P,  AV_PIX_FMT_YUVJ444P,
+    AV_PIX_FMT_YUVJ440P,
+    AV_PIX_FMT_YUV420P9,  AV_PIX_FMT_YUV422P9,  AV_PIX_FMT_YUV444P9,
+    AV_PIX_FMT_YUV420P10, AV_PIX_FMT_YUV422P10, AV_PIX_FMT_YUV444P10,
+    AV_PIX_FMT_YUV420P12, AV_PIX_FMT_YUV422P12, AV_PIX_FMT_YUV444P12,
+    AV_PIX_FMT_YUV420P14, AV_PIX_FMT_YUV422P14, AV_PIX_FMT_YUV444P14,
+    AV_PIX_FMT_YUV420P16, AV_PIX_FMT_YUV422P16, AV_PIX_FMT_YUV444P16,
+    AV_PIX_FMT_YUVA420P,  AV_PIX_FMT_YUVA422P,  AV_PIX_FMT_YUVA444P,
+    AV_PIX_FMT_GBRP,      AV_PIX_FMT_GBRP9,     AV_PIX_FMT_GBRP10,
+    AV_PIX_FMT_GBRP12,    AV_PIX_FMT_GBRP14,    AV_PIX_FMT_GBRP16,
+    AV_PIX_FMT_GBRAP,
+    AV_PIX_FMT_NONE
+};
 
 static int config_output(AVFilterLink *outlink)
 {
     AVFilterContext *ctx = outlink->src;
     YADIFContext *s = ctx->priv;
+    int ret;
 
-    outlink->time_base.num = ctx->inputs[0]->time_base.num;
-    outlink->time_base.den = ctx->inputs[0]->time_base.den * 2;
-    outlink->w             = ctx->inputs[0]->w;
-    outlink->h             = ctx->inputs[0]->h;
-
-    if(s->mode & 1)
-        outlink->frame_rate = av_mul_q(ctx->inputs[0]->frame_rate,
-                                    (AVRational){2, 1});
-
-    if (outlink->w < 3 || outlink->h < 3) {
-        av_log(ctx, AV_LOG_ERROR, "Video of less than 3 columns or lines is not supported\n");
-        return AVERROR(EINVAL);
-    }
+    ret = ff_yadif_config_output_common(outlink);
+    if (ret < 0)
+        return ret;
 
     s->csp = av_pix_fmt_desc_get(outlink->format);
     s->filter = filter;
@@ -317,8 +289,9 @@ static int config_output(AVFilterLink *outlink)
         s->filter_edges = filter_edges;
     }
 
-    if (ARCH_X86)
-        ff_yadif_init_x86(s);
+#if ARCH_X86
+    ff_yadif_init_x86(s);
+#endif
 
     return 0;
 }
@@ -338,7 +311,6 @@ static const AVFilterPad avfilter_vf_yadif_inputs[] = {
         .type          = AVMEDIA_TYPE_VIDEO,
         .filter_frame  = ff_yadif_filter_frame,
     },
-    { NULL }
 };
 
 static const AVFilterPad avfilter_vf_yadif_outputs[] = {
@@ -348,17 +320,16 @@ static const AVFilterPad avfilter_vf_yadif_outputs[] = {
         .request_frame = ff_yadif_request_frame,
         .config_props  = config_output,
     },
-    { NULL }
 };
 
-AVFilter ff_vf_yadif = {
+const AVFilter ff_vf_yadif = {
     .name          = "yadif",
     .description   = NULL_IF_CONFIG_SMALL("Deinterlace the input image."),
     .priv_size     = sizeof(YADIFContext),
     .priv_class    = &yadif_class,
-    .uninit        = uninit,
-    .query_formats = query_formats,
-    .inputs        = avfilter_vf_yadif_inputs,
-    .outputs       = avfilter_vf_yadif_outputs,
+    .uninit        = ff_yadif_uninit,
+    FILTER_INPUTS(avfilter_vf_yadif_inputs),
+    FILTER_OUTPUTS(avfilter_vf_yadif_outputs),
+    FILTER_PIXFMTS_ARRAY(pix_fmts),
     .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL | AVFILTER_FLAG_SLICE_THREADS,
 };

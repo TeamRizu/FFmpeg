@@ -19,7 +19,6 @@
 #ifndef COMPAT_ATOMICS_WIN32_STDATOMIC_H
 #define COMPAT_ATOMICS_WIN32_STDATOMIC_H
 
-#define WIN32_LEAN_AND_MEAN
 #include <stddef.h>
 #include <stdint.h>
 #include <windows.h>
@@ -96,7 +95,7 @@ do {                                    \
     atomic_load(object)
 
 #define atomic_exchange(object, desired) \
-    InterlockedExchangePointer(object, desired);
+    InterlockedExchangePointer((PVOID volatile *)object, (PVOID)desired)
 
 #define atomic_exchange_explicit(object, desired, order) \
     atomic_exchange(object, desired)

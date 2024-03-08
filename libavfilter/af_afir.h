@@ -21,15 +21,14 @@
 #ifndef AVFILTER_AFIR_H
 #define AVFILTER_AFIR_H
 
-#include "libavutil/common.h"
 #include "libavutil/float_dsp.h"
-#include "libavutil/opt.h"
-#include "libavcodec/avfft.h"
-
-#include "audio.h"
+#include "libavutil/frame.h"
+#include "libavutil/rational.h"
+#include "libavutil/tx.h"
 #include "avfilter.h"
-#include "formats.h"
-#include "internal.h"
+#include "af_afirdsp.h"
+
+#define MAX_IR_STREAMS 32
 
 typedef struct AudioFIRSegment {
     int nb_partitions;
@@ -43,20 +42,19 @@ typedef struct AudioFIRSegment {
     int *output_offset;
     int *part_index;
 
-    AVFrame *sum;
-    AVFrame *block;
+    AVFrame *sumin;
+    AVFrame *sumout;
+    AVFrame *blockout;
+    AVFrame *tempin;
+    AVFrame *tempout;
     AVFrame *buffer;
     AVFrame *coeff;
     AVFrame *input;
     AVFrame *output;
 
-    RDFTContext **rdft, **irdft;
+    AVTXContext **ctx, **tx, **itx;
+    av_tx_fn ctx_fn, tx_fn, itx_fn;
 } AudioFIRSegment;
-
-typedef struct AudioFIRDSPContext {
-    void (*fcmul_add)(float *sum, const float *t, const float *c,
-                      ptrdiff_t len);
-} AudioFIRDSPContext;
 
 typedef struct AudioFIRContext {
     const AVClass *class;
@@ -65,8 +63,11 @@ typedef struct AudioFIRContext {
     float dry_gain;
     float length;
     int gtype;
+    float ir_norm;
+    float ir_link;
     float ir_gain;
     int ir_format;
+    int ir_load;
     float max_ir_len;
     int response;
     int w, h;
@@ -75,32 +76,35 @@ typedef struct AudioFIRContext {
     int minp;
     int maxp;
     int nb_irs;
+    int prev_selir;
     int selir;
+    int precision;
+    int format;
 
-    float gain;
-
-    int eof_coeffs[32];
-    int have_coeffs;
-    int nb_taps;
+    int eof_coeffs[MAX_IR_STREAMS];
+    int have_coeffs[MAX_IR_STREAMS];
+    int nb_taps[MAX_IR_STREAMS];
+    int nb_segments[MAX_IR_STREAMS];
+    int max_offset[MAX_IR_STREAMS];
     int nb_channels;
-    int nb_coef_channels;
     int one2many;
+    int prev_is_disabled;
+    int *loading;
+    double *ch_gain;
 
-    AudioFIRSegment seg[1024];
-    int nb_segments;
+    AudioFIRSegment seg[MAX_IR_STREAMS][1024];
 
     AVFrame *in;
-    AVFrame *ir[32];
-    AVFrame *video;
+    AVFrame *xfade[2];
+    AVFrame *fadein[2];
+    AVFrame *ir[MAX_IR_STREAMS];
+    AVFrame *norm_ir[MAX_IR_STREAMS];
     int min_part_size;
+    int max_part_size;
     int64_t pts;
 
     AudioFIRDSPContext afirdsp;
     AVFloatDSPContext *fdsp;
-
 } AudioFIRContext;
-
-void ff_afir_init(AudioFIRDSPContext *s);
-void ff_afir_init_x86(AudioFIRDSPContext *s);
 
 #endif /* AVFILTER_AFIR_H */

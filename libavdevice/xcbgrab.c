@@ -45,6 +45,7 @@
 #include "libavutil/time.h"
 
 #include "libavformat/avformat.h"
+#include "libavformat/demux.h"
 #include "libavformat/internal.h"
 
 typedef struct XCBGrabContext {
@@ -60,6 +61,7 @@ typedef struct XCBGrabContext {
     AVRational time_base;
     int64_t frame_duration;
 
+    xcb_window_t window_id;
     int x, y;
     int width, height;
     int frame_size;
@@ -82,6 +84,7 @@ typedef struct XCBGrabContext {
 #define OFFSET(x) offsetof(XCBGrabContext, x)
 #define D AV_OPT_FLAG_DECODING_PARAM
 static const AVOption options[] = {
+    { "window_id", "Window to capture.", OFFSET(window_id), AV_OPT_TYPE_INT, { .i64 = XCB_NONE }, 0, UINT32_MAX, D },
     { "x", "Initial x coordinate.", OFFSET(x), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, D },
     { "y", "Initial y coordinate.", OFFSET(y), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, D },
     { "grab_x", "Initial x coordinate.", OFFSET(x), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, D },
@@ -90,8 +93,8 @@ static const AVOption options[] = {
     { "framerate", "", OFFSET(framerate), AV_OPT_TYPE_STRING, {.str = "ntsc" }, 0, 0, D },
     { "draw_mouse", "Draw the mouse pointer.", OFFSET(draw_mouse), AV_OPT_TYPE_INT, { .i64 = 1 }, 0, 1, D },
     { "follow_mouse", "Move the grabbing region when the mouse pointer reaches within specified amount of pixels to the edge of region.",
-      OFFSET(follow_mouse), AV_OPT_TYPE_INT, { .i64 = 0 },  FOLLOW_CENTER, INT_MAX, D, "follow_mouse" },
-    { "centered", "Keep the mouse pointer at the center of grabbing region when following.", 0, AV_OPT_TYPE_CONST, { .i64 = -1 }, INT_MIN, INT_MAX, D, "follow_mouse" },
+      OFFSET(follow_mouse), AV_OPT_TYPE_INT, { .i64 = 0 },  FOLLOW_CENTER, INT_MAX, D, .unit = "follow_mouse" },
+    { "centered", "Keep the mouse pointer at the center of grabbing region when following.", 0, AV_OPT_TYPE_CONST, { .i64 = -1 }, INT_MIN, INT_MAX, D, .unit = "follow_mouse" },
     { "show_region", "Show the grabbing region.", OFFSET(show_region), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 1, D },
     { "region_border", "Set the region border thickness.", OFFSET(region_border), AV_OPT_TYPE_INT, { .i64 = 3 }, 1, 128, D },
     { "select_region", "Select the grabbing region graphically using the pointer.", OFFSET(select_region), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, D },
@@ -157,7 +160,7 @@ static int xcbgrab_frame(AVFormatContext *s, AVPacket *pkt)
     XCBGrabContext *c = s->priv_data;
     xcb_get_image_cookie_t iq;
     xcb_get_image_reply_t *img;
-    xcb_drawable_t drawable = c->screen->root;
+    xcb_drawable_t drawable = c->window_id;
     xcb_generic_error_t *e = NULL;
     uint8_t *data;
     int length;
@@ -184,8 +187,6 @@ static int xcbgrab_frame(AVFormatContext *s, AVPacket *pkt)
     data   = xcb_get_image_data(img);
     length = xcb_get_image_data_length(img);
 
-    av_init_packet(pkt);
-
     pkt->buf = av_buffer_create(data, length, xcbgrab_image_reply_free, img, 0);
     if (!pkt->buf) {
         free(img);
@@ -206,7 +207,7 @@ static int64_t wait_frame(AVFormatContext *s, AVPacket *pkt)
     c->time_frame += c->frame_duration;
 
     for (;;) {
-        curtime = av_gettime();
+        curtime = av_gettime_relative();
         delay   = c->time_frame - curtime;
         if (delay <= 0)
             break;
@@ -236,7 +237,7 @@ static void free_shm_buffer(void *opaque, uint8_t *data)
     shmdt(data);
 }
 
-static AVBufferRef *allocate_shm_buffer(void *opaque, int size)
+static AVBufferRef *allocate_shm_buffer(void *opaque, size_t size)
 {
     xcb_connection_t *conn = opaque;
     xcb_shm_seg_t segment;
@@ -267,7 +268,7 @@ static int xcbgrab_frame_shm(AVFormatContext *s, AVPacket *pkt)
     XCBGrabContext *c = s->priv_data;
     xcb_shm_get_image_cookie_t iq;
     xcb_shm_get_image_reply_t *img;
-    xcb_drawable_t drawable = c->screen->root;
+    xcb_drawable_t drawable = c->window_id;
     xcb_generic_error_t *e = NULL;
     AVBufferRef *buf;
     xcb_shm_seg_t segment;
@@ -277,7 +278,7 @@ static int xcbgrab_frame_shm(AVFormatContext *s, AVPacket *pkt)
         av_log(s, AV_LOG_ERROR, "Could not get shared memory buffer.\n");
         return AVERROR(ENOMEM);
     }
-    segment = (xcb_shm_seg_t)av_buffer_pool_buffer_get_opaque(buf);
+    segment = (xcb_shm_seg_t)(uintptr_t)av_buffer_pool_buffer_get_opaque(buf);
 
     iq = xcb_shm_get_image(c->conn, drawable,
                            c->x, c->y, c->width, c->height, ~0,
@@ -300,8 +301,6 @@ static int xcbgrab_frame_shm(AVFormatContext *s, AVPacket *pkt)
     }
 
     free(img);
-
-    av_init_packet(pkt);
 
     pkt->buf = buf;
     pkt->data = buf->data;
@@ -333,7 +332,8 @@ static int check_xfixes(xcb_connection_t *conn)
 
 static void xcbgrab_draw_mouse(AVFormatContext *s, AVPacket *pkt,
                                xcb_query_pointer_reply_t *p,
-                               xcb_get_geometry_reply_t *geo)
+                               xcb_get_geometry_reply_t *geo,
+                               int win_x, int win_y)
 {
     XCBGrabContext *gr = s->priv_data;
     uint32_t *cursor;
@@ -355,17 +355,17 @@ static void xcbgrab_draw_mouse(AVFormatContext *s, AVPacket *pkt,
     cx = ci->x - ci->xhot;
     cy = ci->y - ci->yhot;
 
-    x = FFMAX(cx, gr->x);
-    y = FFMAX(cy, gr->y);
+    x = FFMAX(cx, win_x + gr->x);
+    y = FFMAX(cy, win_y + gr->y);
 
-    w = FFMIN(cx + ci->width,  gr->x + gr->width)  - x;
-    h = FFMIN(cy + ci->height, gr->y + gr->height) - y;
+    w = FFMIN(cx + ci->width,  win_x + gr->x + gr->width)  - x;
+    h = FFMIN(cy + ci->height, win_y + gr->y + gr->height) - y;
 
     c_off = x - cx;
-    i_off = x - gr->x;
+    i_off = x - gr->x - win_x;
 
     cursor += (y - cy) * ci->width;
-    image  += (y - gr->y) * gr->width * stride;
+    image  += (y - gr->y - win_y) * gr->width * stride;
 
     for (y = 0; y < h; y++) {
         cursor += c_off;
@@ -400,11 +400,11 @@ static void xcbgrab_draw_mouse(AVFormatContext *s, AVPacket *pkt,
 }
 #endif /* CONFIG_LIBXCB_XFIXES */
 
-static void xcbgrab_update_region(AVFormatContext *s)
+static void xcbgrab_update_region(AVFormatContext *s, int win_x, int win_y)
 {
     XCBGrabContext *c     = s->priv_data;
-    const uint32_t args[] = { c->x - c->region_border,
-                              c->y - c->region_border };
+    const uint32_t args[] = { win_x + c->x - c->region_border,
+                              win_y + c->y - c->region_border };
 
     xcb_configure_window(c->conn,
                          c->window,
@@ -417,16 +417,20 @@ static int xcbgrab_read_packet(AVFormatContext *s, AVPacket *pkt)
     XCBGrabContext *c = s->priv_data;
     xcb_query_pointer_cookie_t pc;
     xcb_get_geometry_cookie_t gc;
+    xcb_translate_coordinates_cookie_t tc;
     xcb_query_pointer_reply_t *p  = NULL;
     xcb_get_geometry_reply_t *geo = NULL;
+    xcb_translate_coordinates_reply_t *translate = NULL;
     int ret = 0;
     int64_t pts;
+    int win_x = 0, win_y = 0;
 
-    pts = wait_frame(s, pkt);
+    wait_frame(s, pkt);
+    pts = av_gettime();
 
     if (c->follow_mouse || c->draw_mouse) {
-        pc  = xcb_query_pointer(c->conn, c->screen->root);
-        gc  = xcb_get_geometry(c->conn, c->screen->root);
+        pc  = xcb_query_pointer(c->conn, c->window_id);
+        gc  = xcb_get_geometry(c->conn, c->window_id);
         p   = xcb_query_pointer_reply(c->conn, pc, NULL);
         if (!p) {
             av_log(s, AV_LOG_ERROR, "Failed to query xcb pointer\n");
@@ -439,12 +443,25 @@ static int xcbgrab_read_packet(AVFormatContext *s, AVPacket *pkt)
             return AVERROR_EXTERNAL;
         }
     }
+    if (c->window_id != c->screen->root) {
+        tc = xcb_translate_coordinates(c->conn, c->window_id, c->screen->root, 0, 0);
+        translate = xcb_translate_coordinates_reply(c->conn, tc, NULL);
+        if (!translate) {
+            free(p);
+            free(geo);
+            av_log(s, AV_LOG_ERROR, "Failed to translate xcb geometry\n");
+            return AVERROR_EXTERNAL;
+        }
+        win_x = translate->dst_x;
+        win_y = translate->dst_y;
+        free(translate);
+    }
 
     if (c->follow_mouse && p->same_screen)
         xcbgrab_reposition(s, p, geo);
 
     if (c->show_region)
-        xcbgrab_update_region(s);
+        xcbgrab_update_region(s, win_x, win_y);
 
 #if CONFIG_LIBXCB_SHM
     if (c->has_shm && xcbgrab_frame_shm(s, pkt) < 0) {
@@ -459,7 +476,7 @@ static int xcbgrab_read_packet(AVFormatContext *s, AVPacket *pkt)
 
 #if CONFIG_LIBXCB_XFIXES
     if (ret >= 0 && c->draw_mouse && p->same_screen)
-        xcbgrab_draw_mouse(s, pkt, p, geo);
+        xcbgrab_draw_mouse(s, pkt, p, geo, win_x, win_y);
 #endif
 
     free(p);
@@ -513,21 +530,26 @@ static int pixfmt_from_pixmap_format(AVFormatContext *s, int depth,
             switch (depth) {
             case 32:
                 if (fmt->bits_per_pixel == 32)
-                    *pix_fmt = AV_PIX_FMT_0RGB;
+                    *pix_fmt = setup->image_byte_order == XCB_IMAGE_ORDER_LSB_FIRST ?
+                               AV_PIX_FMT_BGR0 : AV_PIX_FMT_0RGB;
                 break;
             case 24:
                 if (fmt->bits_per_pixel == 32)
-                    *pix_fmt = AV_PIX_FMT_0RGB32;
+                    *pix_fmt = setup->image_byte_order == XCB_IMAGE_ORDER_LSB_FIRST ?
+                               AV_PIX_FMT_BGR0 : AV_PIX_FMT_0RGB;
                 else if (fmt->bits_per_pixel == 24)
-                    *pix_fmt = AV_PIX_FMT_RGB24;
+                    *pix_fmt = setup->image_byte_order == XCB_IMAGE_ORDER_LSB_FIRST ?
+                               AV_PIX_FMT_BGR24 : AV_PIX_FMT_RGB24;
                 break;
             case 16:
                 if (fmt->bits_per_pixel == 16)
-                    *pix_fmt = AV_PIX_FMT_RGB565;
+                    *pix_fmt = setup->image_byte_order == XCB_IMAGE_ORDER_LSB_FIRST ?
+                               AV_PIX_FMT_RGB565LE : AV_PIX_FMT_RGB565BE;
                 break;
             case 15:
                 if (fmt->bits_per_pixel == 16)
-                    *pix_fmt = AV_PIX_FMT_RGB555;
+                    *pix_fmt = setup->image_byte_order == XCB_IMAGE_ORDER_LSB_FIRST ?
+                               AV_PIX_FMT_RGB555LE : AV_PIX_FMT_RGB555BE;
                 break;
             case 8:
                 if (fmt->bits_per_pixel == 8)
@@ -566,10 +588,12 @@ static int create_stream(AVFormatContext *s)
 
     avpriv_set_pts_info(st, 64, 1, 1000000);
 
-    gc  = xcb_get_geometry(c->conn, c->screen->root);
+    gc  = xcb_get_geometry(c->conn, c->window_id);
     geo = xcb_get_geometry_reply(c->conn, gc, NULL);
-    if (!geo)
+    if (!geo) {
+        av_log(s, AV_LOG_ERROR, "Can't find window '0x%x', aborting.\n", c->window_id);
         return AVERROR_EXTERNAL;
+    }
 
     if (!c->width || !c->height) {
         c->width = geo->width;
@@ -591,7 +615,7 @@ static int create_stream(AVFormatContext *s)
     c->time_base  = (AVRational){ st->avg_frame_rate.den,
                                   st->avg_frame_rate.num };
     c->frame_duration = av_rescale_q(1, c->time_base, AV_TIME_BASE_Q);
-    c->time_frame = av_gettime();
+    c->time_frame = av_gettime_relative();
 
     ret = pixfmt_from_pixmap_format(s, geo->depth, &st->codecpar->format, &c->bpp);
     free(geo);
@@ -825,6 +849,19 @@ static av_cold int xcbgrab_read_header(AVFormatContext *s)
         return AVERROR(EIO);
     }
 
+    if (c->window_id == XCB_NONE)
+        c->window_id = c->screen->root;
+    else {
+        if (c->select_region) {
+            av_log(s, AV_LOG_WARNING, "select_region ignored with window_id.\n");
+            c->select_region = 0;
+        }
+        if (c->follow_mouse) {
+            av_log(s, AV_LOG_WARNING, "follow_mouse ignored with window_id.\n");
+            c->follow_mouse = 0;
+        }
+    }
+
     if (c->select_region) {
         ret = select_region(s);
         if (ret < 0) {
@@ -864,13 +901,13 @@ static av_cold int xcbgrab_read_header(AVFormatContext *s)
     return 0;
 }
 
-AVInputFormat ff_xcbgrab_demuxer = {
-    .name           = "x11grab",
-    .long_name      = NULL_IF_CONFIG_SMALL("X11 screen capture, using XCB"),
+const FFInputFormat ff_xcbgrab_demuxer = {
+    .p.name         = "x11grab",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("X11 screen capture, using XCB"),
+    .p.flags        = AVFMT_NOFILE,
+    .p.priv_class   = &xcbgrab_class,
     .priv_data_size = sizeof(XCBGrabContext),
     .read_header    = xcbgrab_read_header,
     .read_packet    = xcbgrab_read_packet,
     .read_close     = xcbgrab_read_close,
-    .flags          = AVFMT_NOFILE,
-    .priv_class     = &xcbgrab_class,
 };

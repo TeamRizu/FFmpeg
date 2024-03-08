@@ -20,11 +20,14 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include "config_components.h"
+
 #include "libavutil/avassert.h"
 #include "libavutil/pixdesc.h"
 
 #include "dxva2_internal.h"
 #include "av1dec.h"
+#include "hwaccel_internal.h"
 
 #define MAX_TILES 256
 
@@ -53,14 +56,17 @@ static int get_bit_depth_from_seq(const AV1RawSequenceHeader *seq)
         return 8;
 }
 
-static int fill_picture_parameters(const AVCodecContext *avctx, AVDXVAContext *ctx, const AV1DecContext *h,
+int ff_dxva2_av1_fill_picture_parameters(const AVCodecContext *avctx, AVDXVAContext *ctx,
                                     DXVA_PicParams_AV1 *pp)
 {
     int i,j, uses_lr;
+    const AV1DecContext *h = avctx->priv_data;
     const AV1RawSequenceHeader *seq = h->raw_seq;
     const AV1RawFrameHeader *frame_header = h->raw_frame_header;
+    const AV1RawFilmGrainParams *film_grain = &h->cur_frame.film_grain;
 
     unsigned char remap_lr_type[4] = { AV1_RESTORE_NONE, AV1_RESTORE_SWITCHABLE, AV1_RESTORE_WIENER, AV1_RESTORE_SGRPROJ };
+    int apply_grain = !(avctx->export_side_data & AV_CODEC_EXPORT_DATA_FILM_GRAIN) && film_grain->apply_grain;
 
     memset(pp, 0, sizeof(*pp));
 
@@ -70,8 +76,7 @@ static int fill_picture_parameters(const AVCodecContext *avctx, AVDXVAContext *c
     pp->max_width  = seq->max_frame_width_minus_1 + 1;
     pp->max_height = seq->max_frame_height_minus_1 + 1;
 
-    pp->CurrPicTextureIndex = ff_dxva2_get_surface_index(avctx, ctx, h->cur_frame.tf.f);
-    pp->superres_denom      = frame_header->use_superres ? frame_header->coded_denom : AV1_SUPERRES_NUM;
+    pp->superres_denom      = frame_header->use_superres ? frame_header->coded_denom + AV1_SUPERRES_DENOM_MIN : AV1_SUPERRES_NUM;
     pp->bitdepth            = get_bit_depth_from_seq(seq);
     pp->seq_profile         = seq->seq_profile;
 
@@ -98,7 +103,7 @@ static int fill_picture_parameters(const AVCodecContext *avctx, AVDXVAContext *c
     pp->coding.integer_mv                   = frame_header->force_integer_mv || !(frame_header->frame_type & 1);
     pp->coding.cdef                         = seq->enable_cdef;
     pp->coding.restoration                  = seq->enable_restoration;
-    pp->coding.film_grain                   = seq->film_grain_params_present;
+    pp->coding.film_grain                   = seq->film_grain_params_present && !(avctx->export_side_data & AV_CODEC_EXPORT_DATA_FILM_GRAIN);
     pp->coding.intrabc                      = frame_header->allow_intrabc;
     pp->coding.high_precision_mv            = frame_header->allow_high_precision_mv;
     pp->coding.switchable_motion_mode       = frame_header->is_motion_mode_switchable;
@@ -130,24 +135,26 @@ static int fill_picture_parameters(const AVCodecContext *avctx, AVDXVAContext *c
     memset(pp->RefFrameMapTextureIndex, 0xFF, sizeof(pp->RefFrameMapTextureIndex));
     for (i = 0; i < AV1_REFS_PER_FRAME; i++) {
         int8_t ref_idx = frame_header->ref_frame_idx[i];
-        AVFrame *ref_frame = h->ref[ref_idx].tf.f;
+        AVFrame *ref_frame = h->ref[ref_idx].f;
 
         pp->frame_refs[i].width  = ref_frame->width;
         pp->frame_refs[i].height = ref_frame->height;
         pp->frame_refs[i].Index  = ref_frame->buf[0] ? ref_idx : 0xFF;
 
         /* Global Motion */
-        pp->frame_refs[i].wminvalid = (h->cur_frame.gm_type[AV1_REF_FRAME_LAST + i] == AV1_WARP_MODEL_IDENTITY);
+        pp->frame_refs[i].wminvalid = h->cur_frame.gm_invalid[AV1_REF_FRAME_LAST + i];
         pp->frame_refs[i].wmtype    = h->cur_frame.gm_type[AV1_REF_FRAME_LAST + i];
         for (j = 0; j < 6; ++j) {
              pp->frame_refs[i].wmmat[j] = h->cur_frame.gm_params[AV1_REF_FRAME_LAST + i][j];
         }
     }
     for (i = 0; i < AV1_NUM_REF_FRAMES; i++) {
-        AVFrame *ref_frame = h->ref[i].tf.f;
+        AVFrame *ref_frame = h->ref[i].f;
         if (ref_frame->buf[0])
-            pp->RefFrameMapTextureIndex[i] = ff_dxva2_get_surface_index(avctx, ctx, ref_frame);
+            pp->RefFrameMapTextureIndex[i] = ff_dxva2_get_surface_index(avctx, ctx, ref_frame, 0);
     }
+
+    pp->CurrPicTextureIndex = ff_dxva2_get_surface_index(avctx, ctx, h->cur_frame.f, 1);
 
     /* Loop filter parameters */
     pp->loop_filter.filter_level[0]        = frame_header->loop_filter_level[0];
@@ -214,47 +221,47 @@ static int fill_picture_parameters(const AVCodecContext *avctx, AVDXVAContext *c
     }
 
     /* Film grain */
-    if (frame_header->apply_grain) {
+    if (apply_grain) {
         pp->film_grain.apply_grain              = 1;
-        pp->film_grain.scaling_shift_minus8     = frame_header->grain_scaling_minus_8;
-        pp->film_grain.chroma_scaling_from_luma = frame_header->chroma_scaling_from_luma;
-        pp->film_grain.ar_coeff_lag             = frame_header->ar_coeff_lag;
-        pp->film_grain.ar_coeff_shift_minus6    = frame_header->ar_coeff_shift_minus_6;
-        pp->film_grain.grain_scale_shift        = frame_header->grain_scale_shift;
-        pp->film_grain.overlap_flag             = frame_header->overlap_flag;
-        pp->film_grain.clip_to_restricted_range = frame_header->clip_to_restricted_range;
+        pp->film_grain.scaling_shift_minus8     = film_grain->grain_scaling_minus_8;
+        pp->film_grain.chroma_scaling_from_luma = film_grain->chroma_scaling_from_luma;
+        pp->film_grain.ar_coeff_lag             = film_grain->ar_coeff_lag;
+        pp->film_grain.ar_coeff_shift_minus6    = film_grain->ar_coeff_shift_minus_6;
+        pp->film_grain.grain_scale_shift        = film_grain->grain_scale_shift;
+        pp->film_grain.overlap_flag             = film_grain->overlap_flag;
+        pp->film_grain.clip_to_restricted_range = film_grain->clip_to_restricted_range;
         pp->film_grain.matrix_coeff_is_identity = (seq->color_config.matrix_coefficients == AVCOL_SPC_RGB);
 
-        pp->film_grain.grain_seed               = frame_header->grain_seed;
-        pp->film_grain.num_y_points             = frame_header->num_y_points;
-        for (i = 0; i < frame_header->num_y_points; i++) {
-            pp->film_grain.scaling_points_y[i][0] = frame_header->point_y_value[i];
-            pp->film_grain.scaling_points_y[i][1] = frame_header->point_y_scaling[i];
+        pp->film_grain.grain_seed               = film_grain->grain_seed;
+        pp->film_grain.num_y_points             = film_grain->num_y_points;
+        for (i = 0; i < film_grain->num_y_points; i++) {
+            pp->film_grain.scaling_points_y[i][0] = film_grain->point_y_value[i];
+            pp->film_grain.scaling_points_y[i][1] = film_grain->point_y_scaling[i];
         }
-        pp->film_grain.num_cb_points            = frame_header->num_cb_points;
-        for (i = 0; i < frame_header->num_cb_points; i++) {
-            pp->film_grain.scaling_points_cb[i][0] = frame_header->point_cb_value[i];
-            pp->film_grain.scaling_points_cb[i][1] = frame_header->point_cb_scaling[i];
+        pp->film_grain.num_cb_points            = film_grain->num_cb_points;
+        for (i = 0; i < film_grain->num_cb_points; i++) {
+            pp->film_grain.scaling_points_cb[i][0] = film_grain->point_cb_value[i];
+            pp->film_grain.scaling_points_cb[i][1] = film_grain->point_cb_scaling[i];
         }
-        pp->film_grain.num_cr_points            = frame_header->num_cr_points;
-        for (i = 0; i < frame_header->num_cr_points; i++) {
-            pp->film_grain.scaling_points_cr[i][0] = frame_header->point_cr_value[i];
-            pp->film_grain.scaling_points_cr[i][1] = frame_header->point_cr_scaling[i];
+        pp->film_grain.num_cr_points            = film_grain->num_cr_points;
+        for (i = 0; i < film_grain->num_cr_points; i++) {
+            pp->film_grain.scaling_points_cr[i][0] = film_grain->point_cr_value[i];
+            pp->film_grain.scaling_points_cr[i][1] = film_grain->point_cr_scaling[i];
         }
         for (i = 0; i < 24; i++) {
-            pp->film_grain.ar_coeffs_y[i] = frame_header->ar_coeffs_y_plus_128[i];
+            pp->film_grain.ar_coeffs_y[i] = film_grain->ar_coeffs_y_plus_128[i];
         }
         for (i = 0; i < 25; i++) {
-            pp->film_grain.ar_coeffs_cb[i] = frame_header->ar_coeffs_cb_plus_128[i];
-            pp->film_grain.ar_coeffs_cr[i] = frame_header->ar_coeffs_cr_plus_128[i];
+            pp->film_grain.ar_coeffs_cb[i] = film_grain->ar_coeffs_cb_plus_128[i];
+            pp->film_grain.ar_coeffs_cr[i] = film_grain->ar_coeffs_cr_plus_128[i];
         }
-        pp->film_grain.cb_mult      = frame_header->cb_mult;
-        pp->film_grain.cb_luma_mult = frame_header->cb_luma_mult;
-        pp->film_grain.cr_mult      = frame_header->cr_mult;
-        pp->film_grain.cr_luma_mult = frame_header->cr_luma_mult;
-        pp->film_grain.cb_offset    = frame_header->cb_offset;
-        pp->film_grain.cr_offset    = frame_header->cr_offset;
-        pp->film_grain.cr_offset    = frame_header->cr_offset;
+        pp->film_grain.cb_mult      = film_grain->cb_mult;
+        pp->film_grain.cb_luma_mult = film_grain->cb_luma_mult;
+        pp->film_grain.cr_mult      = film_grain->cr_mult;
+        pp->film_grain.cr_luma_mult = film_grain->cr_luma_mult;
+        pp->film_grain.cb_offset    = film_grain->cb_offset;
+        pp->film_grain.cr_offset    = film_grain->cr_offset;
+        pp->film_grain.cr_offset    = film_grain->cr_offset;
     }
 
     // XXX: Setting the StatusReportFeedbackNumber breaks decoding on some drivers (tested on NVIDIA 457.09)
@@ -276,7 +283,7 @@ static int dxva2_av1_start_frame(AVCodecContext *avctx,
     av_assert0(ctx_pic);
 
     /* Fill up DXVA_PicParams_AV1 */
-    if (fill_picture_parameters(avctx, ctx, h, &ctx_pic->pp) < 0)
+    if (ff_dxva2_av1_fill_picture_parameters(avctx, ctx, &ctx_pic->pp) < 0)
         return -1;
 
     ctx_pic->bitstream_size = 0;
@@ -434,7 +441,7 @@ static int dxva2_av1_end_frame(AVCodecContext *avctx)
     if (ctx_pic->bitstream_size <= 0)
         return -1;
 
-    ret = ff_dxva2_common_end_frame(avctx, h->cur_frame.tf.f,
+    ret = ff_dxva2_common_end_frame(avctx, h->cur_frame.f,
                                     &ctx_pic->pp, sizeof(ctx_pic->pp),
                                     NULL, 0,
                                     commit_bitstream_and_slice_buffer);
@@ -453,11 +460,11 @@ static int dxva2_av1_uninit(AVCodecContext *avctx)
 }
 
 #if CONFIG_AV1_DXVA2_HWACCEL
-const AVHWAccel ff_av1_dxva2_hwaccel = {
-    .name           = "av1_dxva2",
-    .type           = AVMEDIA_TYPE_VIDEO,
-    .id             = AV_CODEC_ID_AV1,
-    .pix_fmt        = AV_PIX_FMT_DXVA2_VLD,
+const FFHWAccel ff_av1_dxva2_hwaccel = {
+    .p.name         = "av1_dxva2",
+    .p.type         = AVMEDIA_TYPE_VIDEO,
+    .p.id           = AV_CODEC_ID_AV1,
+    .p.pix_fmt      = AV_PIX_FMT_DXVA2_VLD,
     .init           = ff_dxva2_decode_init,
     .uninit         = dxva2_av1_uninit,
     .start_frame    = dxva2_av1_start_frame,
@@ -470,11 +477,11 @@ const AVHWAccel ff_av1_dxva2_hwaccel = {
 #endif
 
 #if CONFIG_AV1_D3D11VA_HWACCEL
-const AVHWAccel ff_av1_d3d11va_hwaccel = {
-    .name           = "av1_d3d11va",
-    .type           = AVMEDIA_TYPE_VIDEO,
-    .id             = AV_CODEC_ID_AV1,
-    .pix_fmt        = AV_PIX_FMT_D3D11VA_VLD,
+const FFHWAccel ff_av1_d3d11va_hwaccel = {
+    .p.name         = "av1_d3d11va",
+    .p.type         = AVMEDIA_TYPE_VIDEO,
+    .p.id           = AV_CODEC_ID_AV1,
+    .p.pix_fmt      = AV_PIX_FMT_D3D11VA_VLD,
     .init           = ff_dxva2_decode_init,
     .uninit         = dxva2_av1_uninit,
     .start_frame    = dxva2_av1_start_frame,
@@ -487,11 +494,11 @@ const AVHWAccel ff_av1_d3d11va_hwaccel = {
 #endif
 
 #if CONFIG_AV1_D3D11VA2_HWACCEL
-const AVHWAccel ff_av1_d3d11va2_hwaccel = {
-    .name           = "av1_d3d11va2",
-    .type           = AVMEDIA_TYPE_VIDEO,
-    .id             = AV_CODEC_ID_AV1,
-    .pix_fmt        = AV_PIX_FMT_D3D11,
+const FFHWAccel ff_av1_d3d11va2_hwaccel = {
+    .p.name         = "av1_d3d11va2",
+    .p.type         = AVMEDIA_TYPE_VIDEO,
+    .p.id           = AV_CODEC_ID_AV1,
+    .p.pix_fmt      = AV_PIX_FMT_D3D11,
     .init           = ff_dxva2_decode_init,
     .uninit         = dxva2_av1_uninit,
     .start_frame    = dxva2_av1_start_frame,

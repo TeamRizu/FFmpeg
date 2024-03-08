@@ -30,12 +30,15 @@
 #include "libavutil/frame.h"
 #include "libavutil/imgutils.h"
 #include "libavutil/intreadwrite.h"
+#include "libavutil/mem_internal.h"
+#include "libavutil/thread.h"
 #include "avcodec.h"
 #include "blockdsp.h"
 #include "bswapdsp.h"
 #include "bytestream.h"
+#include "codec_internal.h"
+#include "decode.h"
 #include "get_bits.h"
-#include "internal.h"
 
 
 #define BLOCK_TYPE_VLC_BITS 5
@@ -122,7 +125,7 @@ static const uint8_t dequant_table[64] = {
     20, 35, 34, 32, 31, 22, 15,  8,
 };
 
-static VLC block_type_vlc[2][4];
+static VLCElem block_type_vlc[2][4][32];
 
 
 typedef struct CFrameBuffer {
@@ -245,19 +248,17 @@ static void idct(int16_t block[64])
     }
 }
 
-static av_cold void init_vlcs(FourXContext *f)
+static av_cold void init_vlcs(void)
 {
-    static VLC_TYPE table[2][4][32][2];
     int i, j;
 
     for (i = 0; i < 2; i++) {
         for (j = 0; j < 4; j++) {
-            block_type_vlc[i][j].table           = table[i][j];
-            block_type_vlc[i][j].table_allocated = 32;
-            init_vlc(&block_type_vlc[i][j], BLOCK_TYPE_VLC_BITS, 7,
-                     &block_type_tab[i][j][0][1], 2, 1,
-                     &block_type_tab[i][j][0][0], 2, 1,
-                     INIT_VLC_USE_NEW_STATIC);
+            ff_vlc_init_table_sparse(block_type_vlc[i][j], FF_ARRAY_ELEMS(block_type_vlc[i][j]),
+                                     BLOCK_TYPE_VLC_BITS, 7,
+                                     &block_type_tab[i][j][0][1], 2, 1,
+                                     &block_type_tab[i][j][0][0], 2, 1,
+                                     NULL, 0, 0, 0);
         }
     }
 }
@@ -354,7 +355,7 @@ static int decode_p_block(FourXContext *f, uint16_t *dst, const uint16_t *src,
     if (get_bits_left(&f->gb) < 1)
         return AVERROR_INVALIDDATA;
     h     = 1 << log2h;
-    code  = get_vlc2(&f->gb, block_type_vlc[1 - (f->version > 1)][index].table,
+    code  = get_vlc2(&f->gb, block_type_vlc[1 - (f->version > 1)][index],
                      BLOCK_TYPE_VLC_BITS, 1);
     av_assert0(code >= 0 && code <= 6);
 
@@ -498,8 +499,8 @@ static int decode_i_block(FourXContext *f, int16_t *block)
 {
     int code, i, j, level, val;
 
-    if (get_bits_left(&f->gb) < 2){
-        av_log(f->avctx, AV_LOG_ERROR, "%d bits left before decode_i_block()\n", get_bits_left(&f->gb));
+    if (get_bits_left(&f->pre_gb) < 2) {
+        av_log(f->avctx, AV_LOG_ERROR, "%d bits left before decode_i_block()\n", get_bits_left(&f->pre_gb));
         return AVERROR_INVALIDDATA;
     }
 
@@ -703,8 +704,8 @@ static const uint8_t *read_huffman_tables(FourXContext *f,
         len_tab[j]  = len;
     }
 
-    ff_free_vlc(&f->pre_vlc);
-    if (init_vlc(&f->pre_vlc, ACDC_VLC_BITS, 257, len_tab, 1, 1,
+    ff_vlc_free(&f->pre_vlc);
+    if (vlc_init(&f->pre_vlc, ACDC_VLC_BITS, 257, len_tab, 1, 1,
                  bits_tab, 4, 4, 0))
         return NULL;
 
@@ -831,13 +832,12 @@ static int decode_i_frame(FourXContext *f, const uint8_t *buf, int length)
     return 0;
 }
 
-static int decode_frame(AVCodecContext *avctx, void *data,
+static int decode_frame(AVCodecContext *avctx, AVFrame *picture,
                         int *got_frame, AVPacket *avpkt)
 {
     const uint8_t *buf    = avpkt->data;
     int buf_size          = avpkt->size;
     FourXContext *const f = avctx->priv_data;
-    AVFrame *picture      = data;
     int i, frame_4cc, frame_size, ret;
 
     if (buf_size < 20)
@@ -873,7 +873,7 @@ static int decode_frame(AVCodecContext *avctx, void *data,
         }
 
         for (i = 0; i < CFRAME_BUFFER_COUNT; i++)
-            if (f->cfrm[i].id && f->cfrm[i].id < avctx->frame_number)
+            if (f->cfrm[i].id && f->cfrm[i].id < avctx->frame_num)
                 av_log(f->avctx, AV_LOG_ERROR, "lost c frame %d\n",
                        f->cfrm[i].id);
 
@@ -885,6 +885,8 @@ static int decode_frame(AVCodecContext *avctx, void *data,
         }
 
         if (i >= CFRAME_BUFFER_COUNT) {
+            if (free_index < 0)
+                return AVERROR_INVALIDDATA;
             i             = free_index;
             f->cfrm[i].id = id;
         }
@@ -908,9 +910,9 @@ static int decode_frame(AVCodecContext *avctx, void *data,
             buf        = cfrm->data;
             frame_size = cfrm->size;
 
-            if (id != avctx->frame_number)
-                av_log(f->avctx, AV_LOG_ERROR, "cframe id mismatch %d %d\n",
-                       id, avctx->frame_number);
+            if (id != avctx->frame_num)
+                av_log(f->avctx, AV_LOG_ERROR, "cframe id mismatch %d %"PRId64"\n",
+                       id, avctx->frame_num);
 
             if (f->version <= 1)
                 return AVERROR_INVALIDDATA;
@@ -948,12 +950,17 @@ static int decode_frame(AVCodecContext *avctx, void *data,
     } else if (frame_4cc == AV_RL32("snd_")) {
         av_log(avctx, AV_LOG_ERROR, "ignoring snd_ chunk length:%d\n",
                buf_size);
+        return AVERROR_INVALIDDATA;
     } else {
         av_log(avctx, AV_LOG_ERROR, "ignoring unknown chunk length:%d\n",
                buf_size);
+        return AVERROR_INVALIDDATA;
     }
 
-    picture->key_frame = picture->pict_type == AV_PICTURE_TYPE_I;
+    if (picture->pict_type == AV_PICTURE_TYPE_I)
+        picture->flags |= AV_FRAME_FLAG_KEY;
+    else
+        picture->flags &= ~AV_FRAME_FLAG_KEY;
 
     av_image_copy_plane(picture->data[0], picture->linesize[0],
                         (const uint8_t*)f->frame_buffer,  avctx->width * 2,
@@ -961,8 +968,6 @@ static int decode_frame(AVCodecContext *avctx, void *data,
     FFSWAP(uint16_t *, f->frame_buffer, f->last_frame_buffer);
 
     *got_frame = 1;
-
-    emms_c();
 
     return buf_size;
 }
@@ -980,13 +985,14 @@ static av_cold int decode_end(AVCodecContext *avctx)
         av_freep(&f->cfrm[i].data);
         f->cfrm[i].allocated_size = 0;
     }
-    ff_free_vlc(&f->pre_vlc);
+    ff_vlc_free(&f->pre_vlc);
 
     return 0;
 }
 
 static av_cold int decode_init(AVCodecContext *avctx)
 {
+    static AVOnce init_static_once = AV_ONCE_INIT;
     FourXContext * const f = avctx->priv_data;
     int ret;
 
@@ -1005,33 +1011,33 @@ static av_cold int decode_init(AVCodecContext *avctx)
 
     f->frame_buffer      = av_mallocz(avctx->width * avctx->height * 2);
     f->last_frame_buffer = av_mallocz(avctx->width * avctx->height * 2);
-    if (!f->frame_buffer || !f->last_frame_buffer) {
-        decode_end(avctx);
+    if (!f->frame_buffer || !f->last_frame_buffer)
         return AVERROR(ENOMEM);
-    }
 
     f->version = AV_RL32(avctx->extradata) >> 16;
-    ff_blockdsp_init(&f->bdsp, avctx);
+    ff_blockdsp_init(&f->bdsp);
     ff_bswapdsp_init(&f->bbdsp);
     f->avctx = avctx;
-    init_vlcs(f);
 
     if (f->version > 2)
         avctx->pix_fmt = AV_PIX_FMT_RGB565;
     else
         avctx->pix_fmt = AV_PIX_FMT_BGR555;
 
+    ff_thread_once(&init_static_once, init_vlcs);
+
     return 0;
 }
 
-AVCodec ff_fourxm_decoder = {
-    .name           = "4xm",
-    .long_name      = NULL_IF_CONFIG_SMALL("4X Movie"),
-    .type           = AVMEDIA_TYPE_VIDEO,
-    .id             = AV_CODEC_ID_4XM,
+const FFCodec ff_fourxm_decoder = {
+    .p.name         = "4xm",
+    CODEC_LONG_NAME("4X Movie"),
+    .p.type         = AVMEDIA_TYPE_VIDEO,
+    .p.id           = AV_CODEC_ID_4XM,
     .priv_data_size = sizeof(FourXContext),
     .init           = decode_init,
     .close          = decode_end,
-    .decode         = decode_frame,
-    .capabilities   = AV_CODEC_CAP_DR1,
+    FF_CODEC_DECODE_CB(decode_frame),
+    .p.capabilities = AV_CODEC_CAP_DR1,
+    .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
 };

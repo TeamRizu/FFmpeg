@@ -21,6 +21,7 @@
 
 #include "avcodec.h"
 #include "ass.h"
+#include "codec_internal.h"
 #include "libavutil/opt.h"
 
 #define SCREEN_ROWS 15
@@ -237,6 +238,7 @@ struct Screen {
 typedef struct CCaptionSubContext {
     AVClass *class;
     int real_time;
+    int real_time_latency_msec;
     int data_field;
     struct Screen screen[2];
     int active_screen;
@@ -260,7 +262,6 @@ typedef struct CCaptionSubContext {
 
 static av_cold int init_decoder(AVCodecContext *avctx)
 {
-    int ret;
     CCaptionSubContext *ctx = avctx->priv_data;
 
     av_bprint_init(&ctx->buffer[0], 0, AV_BPRINT_SIZE_UNLIMITED);
@@ -270,7 +271,7 @@ static av_cold int init_decoder(AVCodecContext *avctx)
     ctx->bg_color = CCCOL_BLACK;
     ctx->rollup = 2;
     ctx->cursor_row = 10;
-    ret = ff_ass_subtitle_header(avctx, "Monospace",
+    return ff_ass_subtitle_header(avctx, "Monospace",
                                  ASS_DEFAULT_FONT_SIZE,
                                  ASS_DEFAULT_COLOR,
                                  ASS_DEFAULT_BACK_COLOR,
@@ -279,11 +280,6 @@ static av_cold int init_decoder(AVCodecContext *avctx)
                                  ASS_DEFAULT_UNDERLINE,
                                  3,
                                  ASS_DEFAULT_ALIGNMENT);
-    if (ret < 0) {
-        return ret;
-    }
-
-    return ret;
 }
 
 static av_cold int close_decoder(AVCodecContext *avctx)
@@ -836,10 +832,10 @@ static int process_cc608(CCaptionSubContext *ctx, uint8_t hi, uint8_t lo)
     return ret;
 }
 
-static int decode(AVCodecContext *avctx, void *data, int *got_sub, AVPacket *avpkt)
+static int decode(AVCodecContext *avctx, AVSubtitle *sub,
+                  int *got_sub, const AVPacket *avpkt)
 {
     CCaptionSubContext *ctx = avctx->priv_data;
-    AVSubtitle *sub = data;
     int64_t in_time = sub->pts;
     int64_t start_time;
     int64_t end_time;
@@ -848,6 +844,7 @@ static int decode(AVCodecContext *avctx, void *data, int *got_sub, AVPacket *avp
     int len = avpkt->size;
     int ret = 0;
     int i;
+    unsigned nb_rect_allocated = 0;
 
     for (i = 0; i < len; i += 3) {
         uint8_t hi, cc_type = bptr[i] & 1;
@@ -884,7 +881,7 @@ static int decode(AVCodecContext *avctx, void *data, int *got_sub, AVPacket *avp
                                                      AV_TIME_BASE_Q, ms_tb);
             else
                 sub->end_display_time = -1;
-            ret = ff_ass_add_rect(sub, ctx->buffer[bidx].str, ctx->readorder++, 0, NULL, NULL);
+            ret = ff_ass_add_rect2(sub, ctx->buffer[bidx].str, ctx->readorder++, 0, NULL, NULL, &nb_rect_allocated);
             if (ret < 0)
                 return ret;
             ctx->last_real_time = sub->pts;
@@ -894,9 +891,10 @@ static int decode(AVCodecContext *avctx, void *data, int *got_sub, AVPacket *avp
 
     if (!bptr && !ctx->real_time && ctx->buffer[!ctx->buffer_index].str[0]) {
         bidx = !ctx->buffer_index;
-        ret = ff_ass_add_rect(sub, ctx->buffer[bidx].str, ctx->readorder++, 0, NULL, NULL);
+        ret = ff_ass_add_rect2(sub, ctx->buffer[bidx].str, ctx->readorder++, 0, NULL, NULL, &nb_rect_allocated);
         if (ret < 0)
             return ret;
+        av_bprint_clear(&ctx->buffer[bidx]);
         sub->pts = ctx->buffer_time[1];
         sub->end_display_time = av_rescale_q(ctx->buffer_time[1] - ctx->buffer_time[0],
                                              AV_TIME_BASE_Q, ms_tb);
@@ -905,31 +903,32 @@ static int decode(AVCodecContext *avctx, void *data, int *got_sub, AVPacket *avp
     }
 
     if (ctx->real_time && ctx->screen_touched &&
-        sub->pts > ctx->last_real_time + av_rescale_q(200, ms_tb, AV_TIME_BASE_Q)) {
+        sub->pts >= ctx->last_real_time + av_rescale_q(ctx->real_time_latency_msec, ms_tb, AV_TIME_BASE_Q)) {
         ctx->last_real_time = sub->pts;
         ctx->screen_touched = 0;
 
         capture_screen(ctx);
         ctx->buffer_changed = 0;
 
-        ret = ff_ass_add_rect(sub, ctx->buffer[bidx].str, ctx->readorder++, 0, NULL, NULL);
+        ret = ff_ass_add_rect2(sub, ctx->buffer[bidx].str, ctx->readorder++, 0, NULL, NULL, &nb_rect_allocated);
         if (ret < 0)
             return ret;
         sub->end_display_time = -1;
     }
 
     *got_sub = sub->num_rects > 0;
-    return ret;
+    return avpkt->size;
 }
 
 #define OFFSET(x) offsetof(CCaptionSubContext, x)
 #define SD AV_OPT_FLAG_SUBTITLE_PARAM | AV_OPT_FLAG_DECODING_PARAM
 static const AVOption options[] = {
     { "real_time", "emit subtitle events as they are decoded for real-time display", OFFSET(real_time), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, SD },
-    { "data_field", "select data field", OFFSET(data_field), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 1, SD, "data_field" },
-    { "auto",   "pick first one that appears", 0, AV_OPT_TYPE_CONST, { .i64 =-1 }, 0, 0, SD, "data_field" },
-    { "first",  NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 0 }, 0, 0, SD, "data_field" },
-    { "second", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 1 }, 0, 0, SD, "data_field" },
+    { "real_time_latency_msec", "minimum elapsed time between emitting real-time subtitle events", OFFSET(real_time_latency_msec), AV_OPT_TYPE_INT, { .i64 = 200 }, 0, 500, SD },
+    { "data_field", "select data field", OFFSET(data_field), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 1, SD, .unit = "data_field" },
+    { "auto",   "pick first one that appears", 0, AV_OPT_TYPE_CONST, { .i64 =-1 }, 0, 0, SD, .unit = "data_field" },
+    { "first",  NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 0 }, 0, 0, SD, .unit = "data_field" },
+    { "second", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 1 }, 0, 0, SD, .unit = "data_field" },
     {NULL}
 };
 
@@ -940,16 +939,16 @@ static const AVClass ccaption_dec_class = {
     .version    = LIBAVUTIL_VERSION_INT,
 };
 
-AVCodec ff_ccaption_decoder = {
-    .name           = "cc_dec",
-    .long_name      = NULL_IF_CONFIG_SMALL("Closed Caption (EIA-608 / CEA-708)"),
-    .type           = AVMEDIA_TYPE_SUBTITLE,
-    .id             = AV_CODEC_ID_EIA_608,
+const FFCodec ff_ccaption_decoder = {
+    .p.name         = "cc_dec",
+    CODEC_LONG_NAME("Closed Caption (EIA-608 / CEA-708)"),
+    .p.type         = AVMEDIA_TYPE_SUBTITLE,
+    .p.id           = AV_CODEC_ID_EIA_608,
+    .p.priv_class   = &ccaption_dec_class,
+    .p.capabilities = AV_CODEC_CAP_DELAY,
     .priv_data_size = sizeof(CCaptionSubContext),
     .init           = init_decoder,
     .close          = close_decoder,
     .flush          = flush_decoder,
-    .decode         = decode,
-    .priv_class     = &ccaption_dec_class,
-    .capabilities   = AV_CODEC_CAP_DELAY,
+    FF_CODEC_DECODE_SUB_CB(decode),
 };

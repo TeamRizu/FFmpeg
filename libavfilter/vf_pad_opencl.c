@@ -19,10 +19,9 @@
 #include "libavutil/colorspace.h"
 #include "libavutil/eval.h"
 #include "libavutil/opt.h"
-#include "libavutil/imgutils.h"
+#include "libavutil/pixdesc.h"
 #include "avfilter.h"
 #include "drawutils.h"
-#include "formats.h"
 #include "internal.h"
 #include "opencl.h"
 #include "opencl_source.h"
@@ -93,7 +92,7 @@ static int pad_opencl_init(AVFilterContext *avctx, AVFrame *input_frame)
     ctx->hsub = desc->log2_chroma_w;
     ctx->vsub = desc->log2_chroma_h;
 
-    err = ff_opencl_filter_load_program(avctx, &ff_opencl_source_pad, 1);
+    err = ff_opencl_filter_load_program(avctx, &ff_source_pad_cl, 1);
     if (err < 0)
         goto fail;
 
@@ -354,7 +353,6 @@ static const AVFilterPad pad_opencl_inputs[] = {
         .filter_frame = filter_frame,
         .config_props = &ff_opencl_filter_config_input,
     },
-    { NULL }
 };
 
 static const AVFilterPad pad_opencl_outputs[] = {
@@ -363,7 +361,6 @@ static const AVFilterPad pad_opencl_outputs[] = {
         .type = AVMEDIA_TYPE_VIDEO,
         .config_props = &pad_opencl_config_output,
     },
-    { NULL }
 };
 
 #define OFFSET(x) offsetof(PadOpenCLContext, x)
@@ -383,15 +380,16 @@ static const AVOption pad_opencl_options[] = {
 
 AVFILTER_DEFINE_CLASS(pad_opencl);
 
-AVFilter ff_vf_pad_opencl = {
+const AVFilter ff_vf_pad_opencl = {
     .name           = "pad_opencl",
     .description    = NULL_IF_CONFIG_SMALL("Pad the input video."),
     .priv_size      = sizeof(PadOpenCLContext),
     .priv_class     = &pad_opencl_class,
     .init           = &ff_opencl_filter_init,
     .uninit         = &pad_opencl_uninit,
-    .query_formats  = &ff_opencl_filter_query_formats,
-    .inputs         = pad_opencl_inputs,
-    .outputs        = pad_opencl_outputs,
-    .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE
+    FILTER_INPUTS(pad_opencl_inputs),
+    FILTER_OUTPUTS(pad_opencl_outputs),
+    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_OPENCL),
+    .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
+    .flags          = AVFILTER_FLAG_HWDEVICE,
 };

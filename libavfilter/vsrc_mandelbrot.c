@@ -27,12 +27,10 @@
  */
 
 #include "avfilter.h"
-#include "formats.h"
 #include "video.h"
 #include "internal.h"
 #include "libavutil/imgutils.h"
 #include "libavutil/opt.h"
-#include "libavutil/parseutils.h"
 #include <float.h>
 #include <math.h>
 
@@ -102,17 +100,17 @@ static const AVOption mandelbrot_options[] = {
     {"morphyf",     "set morph y frequency",         OFFSET(morphyf), AV_OPT_TYPE_DOUBLE,     {.dbl=0.0123}, -FLT_MAX, FLT_MAX, FLAGS },
     {"morphamp",    "set morph amplitude",           OFFSET(morphamp), AV_OPT_TYPE_DOUBLE,    {.dbl=0},      -FLT_MAX, FLT_MAX, FLAGS },
 
-    {"outer",       "set outer coloring mode",       OFFSET(outer), AV_OPT_TYPE_INT, {.i64=NORMALIZED_ITERATION_COUNT}, 0, INT_MAX, FLAGS, "outer" },
-    {"iteration_count", "set iteration count mode",  0, AV_OPT_TYPE_CONST, {.i64=ITERATION_COUNT}, INT_MIN, INT_MAX, FLAGS, "outer" },
-    {"normalized_iteration_count", "set normalized iteration count mode",   0, AV_OPT_TYPE_CONST, {.i64=NORMALIZED_ITERATION_COUNT}, INT_MIN, INT_MAX, FLAGS, "outer" },
-    {"white", "set white mode",                      0, AV_OPT_TYPE_CONST, {.i64=WHITE}, INT_MIN, INT_MAX, FLAGS, "outer" },
-    {"outz",        "set outz mode",                 0, AV_OPT_TYPE_CONST, {.i64=OUTZ}, INT_MIN, INT_MAX, FLAGS, "outer" },
+    {"outer",       "set outer coloring mode",       OFFSET(outer), AV_OPT_TYPE_INT, {.i64=NORMALIZED_ITERATION_COUNT}, 0, INT_MAX, FLAGS, .unit = "outer" },
+    {"iteration_count", "set iteration count mode",  0, AV_OPT_TYPE_CONST, {.i64=ITERATION_COUNT}, INT_MIN, INT_MAX, FLAGS, .unit = "outer" },
+    {"normalized_iteration_count", "set normalized iteration count mode",   0, AV_OPT_TYPE_CONST, {.i64=NORMALIZED_ITERATION_COUNT}, INT_MIN, INT_MAX, FLAGS, .unit = "outer" },
+    {"white", "set white mode",                      0, AV_OPT_TYPE_CONST, {.i64=WHITE}, INT_MIN, INT_MAX, FLAGS, .unit = "outer" },
+    {"outz",        "set outz mode",                 0, AV_OPT_TYPE_CONST, {.i64=OUTZ}, INT_MIN, INT_MAX, FLAGS, .unit = "outer" },
 
-    {"inner",       "set inner coloring mode",       OFFSET(inner), AV_OPT_TYPE_INT, {.i64=MINCOL}, 0, INT_MAX, FLAGS, "inner" },
-    {"black",       "set black mode",                0, AV_OPT_TYPE_CONST, {.i64=BLACK}, INT_MIN, INT_MAX, FLAGS, "inner"},
-    {"period",      "set period mode",               0, AV_OPT_TYPE_CONST, {.i64=PERIOD}, INT_MIN, INT_MAX, FLAGS, "inner"},
-    {"convergence", "show time until convergence",   0, AV_OPT_TYPE_CONST, {.i64=CONVTIME}, INT_MIN, INT_MAX, FLAGS, "inner"},
-    {"mincol",      "color based on point closest to the origin of the iterations",   0, AV_OPT_TYPE_CONST, {.i64=MINCOL}, INT_MIN, INT_MAX, FLAGS, "inner"},
+    {"inner",       "set inner coloring mode",       OFFSET(inner), AV_OPT_TYPE_INT, {.i64=MINCOL}, 0, INT_MAX, FLAGS, .unit = "inner" },
+    {"black",       "set black mode",                0, AV_OPT_TYPE_CONST, {.i64=BLACK}, INT_MIN, INT_MAX, FLAGS, .unit = "inner"},
+    {"period",      "set period mode",               0, AV_OPT_TYPE_CONST, {.i64=PERIOD}, INT_MIN, INT_MAX, FLAGS, .unit = "inner"},
+    {"convergence", "show time until convergence",   0, AV_OPT_TYPE_CONST, {.i64=CONVTIME}, INT_MIN, INT_MAX, FLAGS, .unit = "inner"},
+    {"mincol",      "color based on point closest to the origin of the iterations",   0, AV_OPT_TYPE_CONST, {.i64=MINCOL}, INT_MIN, INT_MAX, FLAGS, .unit = "inner"},
 
     {NULL},
 };
@@ -134,6 +132,9 @@ static av_cold int init(AVFilterContext *ctx)
     s-> next_cache= av_malloc_array(s->cache_allocated, sizeof(*s-> next_cache));
     s-> zyklus    = av_malloc_array(s->maxiter + 16, sizeof(*s->zyklus));
 
+    if (!s->point_cache || !s->next_cache || !s->zyklus)
+        return AVERROR(ENOMEM);
+
     return 0;
 }
 
@@ -146,30 +147,18 @@ static av_cold void uninit(AVFilterContext *ctx)
     av_freep(&s->zyklus);
 }
 
-static int query_formats(AVFilterContext *ctx)
+static int config_props(AVFilterLink *outlink)
 {
-    static const enum AVPixelFormat pix_fmts[] = {
-        AV_PIX_FMT_0BGR32,
-        AV_PIX_FMT_NONE
-    };
-
-    AVFilterFormats *fmts_list = ff_make_format_list(pix_fmts);
-    if (!fmts_list)
-        return AVERROR(ENOMEM);
-    return ff_set_common_formats(ctx, fmts_list);
-}
-
-static int config_props(AVFilterLink *inlink)
-{
-    AVFilterContext *ctx = inlink->src;
+    AVFilterContext *ctx = outlink->src;
     MBContext *s = ctx->priv;
 
     if (av_image_check_size(s->w, s->h, 0, ctx) < 0)
         return AVERROR(EINVAL);
 
-    inlink->w = s->w;
-    inlink->h = s->h;
-    inlink->time_base = av_inv_q(s->frame_rate);
+    outlink->w = s->w;
+    outlink->h = s->h;
+    outlink->time_base = av_inv_q(s->frame_rate);
+    outlink->frame_rate = s->frame_rate;
 
     return 0;
 }
@@ -404,6 +393,7 @@ static int request_frame(AVFilterLink *link)
 
     picref->sample_aspect_ratio = (AVRational) {1, 1};
     picref->pts = s->pts++;
+    picref->duration = 1;
 
     draw_mandelbrot(link->src, (uint32_t*)picref->data[0], picref->linesize[0]/4, picref->pts);
     return ff_filter_frame(link, picref);
@@ -416,17 +406,16 @@ static const AVFilterPad mandelbrot_outputs[] = {
         .request_frame = request_frame,
         .config_props  = config_props,
     },
-    { NULL }
 };
 
-AVFilter ff_vsrc_mandelbrot = {
+const AVFilter ff_vsrc_mandelbrot = {
     .name          = "mandelbrot",
     .description   = NULL_IF_CONFIG_SMALL("Render a Mandelbrot fractal."),
     .priv_size     = sizeof(MBContext),
     .priv_class    = &mandelbrot_class,
     .init          = init,
     .uninit        = uninit,
-    .query_formats = query_formats,
     .inputs        = NULL,
-    .outputs       = mandelbrot_outputs,
+    FILTER_OUTPUTS(mandelbrot_outputs),
+    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_0BGR32),
 };

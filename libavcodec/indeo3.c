@@ -31,12 +31,14 @@
 
 #include "libavutil/imgutils.h"
 #include "libavutil/intreadwrite.h"
+#include "libavutil/thread.h"
 #include "avcodec.h"
+#include "codec_internal.h"
+#include "decode.h"
 #include "copy_block.h"
 #include "bytestream.h"
 #include "get_bits.h"
 #include "hpeldsp.h"
-#include "internal.h"
 
 #include "indeo3data.h"
 
@@ -169,9 +171,12 @@ static av_cold int allocate_frame_buffers(Indeo3DecodeContext *ctx,
     int luma_size, chroma_size;
     ptrdiff_t luma_pitch, chroma_pitch;
 
+    luma_width  = FFALIGN(luma_width , 2);
+    luma_height = FFALIGN(luma_height, 2);
+
     if (luma_width  < 16 || luma_width  > 640 ||
         luma_height < 16 || luma_height > 480 ||
-        luma_width  &  3 || luma_height &   3) {
+        luma_width  &  1 || luma_height &   1) {
         av_log(avctx, AV_LOG_ERROR, "Invalid picture dimensions: %d x %d!\n",
                luma_width, luma_height);
         return AVERROR_INVALIDDATA;
@@ -1049,12 +1054,13 @@ static void output_plane(const Plane *plane, int buf_sel, uint8_t *dst,
 
 static av_cold int decode_init(AVCodecContext *avctx)
 {
+    static AVOnce init_static_once = AV_ONCE_INIT;
     Indeo3DecodeContext *ctx = avctx->priv_data;
 
     ctx->avctx     = avctx;
     avctx->pix_fmt = AV_PIX_FMT_YUV410P;
 
-    build_requant_tab();
+    ff_thread_once(&init_static_once, build_requant_tab);
 
     ff_hpeldsp_init(&ctx->hdsp, avctx->flags);
 
@@ -1062,13 +1068,12 @@ static av_cold int decode_init(AVCodecContext *avctx)
 }
 
 
-static int decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
-                        AVPacket *avpkt)
+static int decode_frame(AVCodecContext *avctx, AVFrame *frame,
+                        int *got_frame, AVPacket *avpkt)
 {
     Indeo3DecodeContext *ctx = avctx->priv_data;
     const uint8_t *buf = avpkt->data;
     int buf_size       = avpkt->size;
-    AVFrame *frame     = data;
     int res;
 
     res = decode_frame_headers(ctx, avctx, buf, buf_size);
@@ -1131,15 +1136,15 @@ static av_cold int decode_close(AVCodecContext *avctx)
     return 0;
 }
 
-AVCodec ff_indeo3_decoder = {
-    .name           = "indeo3",
-    .long_name      = NULL_IF_CONFIG_SMALL("Intel Indeo 3"),
-    .type           = AVMEDIA_TYPE_VIDEO,
-    .id             = AV_CODEC_ID_INDEO3,
+const FFCodec ff_indeo3_decoder = {
+    .p.name         = "indeo3",
+    CODEC_LONG_NAME("Intel Indeo 3"),
+    .p.type         = AVMEDIA_TYPE_VIDEO,
+    .p.id           = AV_CODEC_ID_INDEO3,
     .priv_data_size = sizeof(Indeo3DecodeContext),
     .init           = decode_init,
     .close          = decode_close,
-    .decode         = decode_frame,
-    .capabilities   = AV_CODEC_CAP_DR1,
+    FF_CODEC_DECODE_CB(decode_frame),
+    .p.capabilities = AV_CODEC_CAP_DR1,
     .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
 };

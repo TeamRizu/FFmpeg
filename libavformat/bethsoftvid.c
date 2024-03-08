@@ -31,6 +31,7 @@
 #include "libavutil/imgutils.h"
 #include "libavutil/intreadwrite.h"
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 #include "libavcodec/bethsoftvideo.h"
 
@@ -254,8 +255,7 @@ static int vid_read_packet(AVFormatContext *s,
                 vid->audio_index                 = st->index;
                 st->codecpar->codec_type            = AVMEDIA_TYPE_AUDIO;
                 st->codecpar->codec_id              = AV_CODEC_ID_PCM_U8;
-                st->codecpar->channels              = 1;
-                st->codecpar->channel_layout        = AV_CH_LAYOUT_MONO;
+                st->codecpar->ch_layout             = (AVChannelLayout)AV_CHANNEL_LAYOUT_MONO;
                 st->codecpar->bits_per_coded_sample = 8;
                 st->codecpar->sample_rate           = vid->sample_rate;
                 st->codecpar->bit_rate              = 8 * st->codecpar->sample_rate;
@@ -291,9 +291,9 @@ static int vid_read_packet(AVFormatContext *s,
     }
 }
 
-AVInputFormat ff_bethsoftvid_demuxer = {
-    .name           = "bethsoftvid",
-    .long_name      = NULL_IF_CONFIG_SMALL("Bethesda Softworks VID"),
+const FFInputFormat ff_bethsoftvid_demuxer = {
+    .p.name         = "bethsoftvid",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("Bethesda Softworks VID"),
     .priv_data_size = sizeof(BVID_DemuxContext),
     .read_probe     = vid_probe,
     .read_header    = vid_read_header,

@@ -22,16 +22,14 @@
 /**
  * @file
  * Apple HTTP Live Streaming Protocol Handler
- * http://tools.ietf.org/html/draft-pantos-http-live-streaming
+ * https://www.rfc-editor.org/rfc/rfc8216.txt
  */
 
 #include "libavutil/avstring.h"
 #include "libavutil/time.h"
-#include "avformat.h"
 #include "avio_internal.h"
 #include "internal.h"
 #include "url.h"
-#include "version.h"
 
 /*
  * An apple http stream consists of a playlist with media segment files,

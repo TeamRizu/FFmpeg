@@ -30,7 +30,7 @@ void ff_rtp_send_jpeg(AVFormatContext *s1, const uint8_t *buf, int size)
     RTPMuxContext *s = s1->priv_data;
     const uint8_t *qtables[4] = { NULL };
     int nb_qtables = 0;
-    uint8_t type;
+    uint8_t type = 2; /* initialized non-0/1 value for RTP/JPEG type check*/
     uint8_t w, h;
     uint8_t *p;
     int off = 0; /* fragment offset of the current JPEG frame */
@@ -44,20 +44,6 @@ void ff_rtp_send_jpeg(AVFormatContext *s1, const uint8_t *buf, int size)
     /* convert video pixel dimensions from pixels to blocks */
     w = AV_CEIL_RSHIFT(s1->streams[0]->codecpar->width, 3);
     h = AV_CEIL_RSHIFT(s1->streams[0]->codecpar->height, 3);
-
-    /* get the pixel format type or fail */
-    if (s1->streams[0]->codecpar->format == AV_PIX_FMT_YUVJ422P ||
-        (s1->streams[0]->codecpar->color_range == AVCOL_RANGE_JPEG &&
-         s1->streams[0]->codecpar->format == AV_PIX_FMT_YUV422P)) {
-        type = 0;
-    } else if (s1->streams[0]->codecpar->format == AV_PIX_FMT_YUVJ420P ||
-               (s1->streams[0]->codecpar->color_range == AVCOL_RANGE_JPEG &&
-                s1->streams[0]->codecpar->format == AV_PIX_FMT_YUV420P)) {
-        type = 1;
-    } else {
-        av_log(s1, AV_LOG_ERROR, "Unsupported pixel format\n");
-        return;
-    }
 
     /* preparse the header for getting some info */
     for (i = 0; i < size; i++) {
@@ -90,6 +76,23 @@ void ff_rtp_send_jpeg(AVFormatContext *s1, const uint8_t *buf, int size)
                        "Only 1x1 chroma blocks are supported. Aborted!\n");
                 return;
             }
+
+            /*
+             * Find out the sampling factor in SOF0.
+             * In SOF0, hsample/vsample is inserted in form of (2<<4) | (type ? 2 : 1).
+             * First 4-bit is hsample while Last 4-bit is vsample.
+             */
+
+            /* Luma channel sampling factor in 4:2:2 chroma subsampling are 2x1 */
+            if (buf[i + 11] == 33) {
+                type = 0;
+            /* Luma channel sampling factor in 4:2:0 chroma subsampling are 2x2 */
+            } else if (buf[i + 11] == 34) {
+                type = 1;
+            } else {
+                av_log(s1, AV_LOG_ERROR, "Unsupported pixel format\n");
+                return;
+            }
         } else if (buf[i + 1] == DHT) {
             int dht_size = AV_RB16(&buf[i + 2]);
             default_huffman_tables |= 1 << 4;
@@ -101,8 +104,8 @@ void ff_rtp_send_jpeg(AVFormatContext *s1, const uint8_t *buf, int size)
                 switch (buf[i + 1]) {
                 case 0x00:
                     if (   dht_size >= 29
-                        && !memcmp(buf + i +  2, avpriv_mjpeg_bits_dc_luminance + 1, 16)
-                        && !memcmp(buf + i + 18, avpriv_mjpeg_val_dc, 12)) {
+                        && !memcmp(buf + i +  2, ff_mjpeg_bits_dc_luminance + 1, 16)
+                        && !memcmp(buf + i + 18, ff_mjpeg_val_dc, 12)) {
                         default_huffman_tables |= 1;
                         i += 29;
                         dht_size -= 29;
@@ -113,8 +116,8 @@ void ff_rtp_send_jpeg(AVFormatContext *s1, const uint8_t *buf, int size)
                     break;
                 case 0x01:
                     if (   dht_size >= 29
-                        && !memcmp(buf + i +  2, avpriv_mjpeg_bits_dc_chrominance + 1, 16)
-                        && !memcmp(buf + i + 18, avpriv_mjpeg_val_dc, 12)) {
+                        && !memcmp(buf + i +  2, ff_mjpeg_bits_dc_chrominance + 1, 16)
+                        && !memcmp(buf + i + 18, ff_mjpeg_val_dc, 12)) {
                         default_huffman_tables |= 1 << 1;
                         i += 29;
                         dht_size -= 29;
@@ -125,8 +128,8 @@ void ff_rtp_send_jpeg(AVFormatContext *s1, const uint8_t *buf, int size)
                     break;
                 case 0x10:
                     if (   dht_size >= 179
-                        && !memcmp(buf + i +  2, avpriv_mjpeg_bits_ac_luminance   + 1, 16)
-                        && !memcmp(buf + i + 18, avpriv_mjpeg_val_ac_luminance, 162)) {
+                        && !memcmp(buf + i +  2, ff_mjpeg_bits_ac_luminance   + 1, 16)
+                        && !memcmp(buf + i + 18, ff_mjpeg_val_ac_luminance, 162)) {
                         default_huffman_tables |= 1 << 2;
                         i += 179;
                         dht_size -= 179;
@@ -137,8 +140,8 @@ void ff_rtp_send_jpeg(AVFormatContext *s1, const uint8_t *buf, int size)
                     break;
                 case 0x11:
                     if (   dht_size >= 179
-                        && !memcmp(buf + i +  2, avpriv_mjpeg_bits_ac_chrominance + 1, 16)
-                        && !memcmp(buf + i + 18, avpriv_mjpeg_val_ac_chrominance, 162)) {
+                        && !memcmp(buf + i +  2, ff_mjpeg_bits_ac_chrominance + 1, 16)
+                        && !memcmp(buf + i + 18, ff_mjpeg_val_ac_chrominance, 162)) {
                         default_huffman_tables |= 1 << 3;
                         i += 179;
                         dht_size -= 179;
@@ -163,6 +166,14 @@ void ff_rtp_send_jpeg(AVFormatContext *s1, const uint8_t *buf, int size)
             break;
         }
     }
+
+    /* Check validity of RTP/JPEG type */
+    if (type != 0 && type != 1) {
+        av_log(s1, AV_LOG_ERROR,
+               "Invalid RTP/JPEG type\n");
+        return;
+    }
+
     if (default_huffman_tables && default_huffman_tables != 31) {
         av_log(s1, AV_LOG_ERROR,
                "RFC 2435 requires standard Huffman tables for jpeg\n");

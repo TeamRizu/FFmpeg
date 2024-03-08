@@ -20,7 +20,9 @@
 
 #include "libavutil/imgutils.h"
 #include "avfilter.h"
+#include "filters.h"
 #include "internal.h"
+#include "video.h"
 
 typedef struct RepeatFieldsContext {
     const AVClass *class;
@@ -38,23 +40,15 @@ static av_cold void uninit(AVFilterContext *ctx)
     av_frame_free(&s->frame);
 }
 
-static int query_formats(AVFilterContext *ctx)
-{
-    static const enum AVPixelFormat pixel_fmts_eq[] = {
-        AV_PIX_FMT_GRAY8,
-        AV_PIX_FMT_YUV410P,
-        AV_PIX_FMT_YUV411P,
-        AV_PIX_FMT_YUV420P,
-        AV_PIX_FMT_YUV422P,
-        AV_PIX_FMT_YUV444P,
-        AV_PIX_FMT_NONE
-    };
-
-    AVFilterFormats *fmts_list = ff_make_format_list(pixel_fmts_eq);
-    if (!fmts_list)
-        return AVERROR(ENOMEM);
-    return ff_set_common_formats(ctx, fmts_list);
-}
+static const enum AVPixelFormat pixel_fmts_eq[] = {
+    AV_PIX_FMT_GRAY8,
+    AV_PIX_FMT_YUV410P,
+    AV_PIX_FMT_YUV411P,
+    AV_PIX_FMT_YUV420P,
+    AV_PIX_FMT_YUV422P,
+    AV_PIX_FMT_YUV444P,
+    AV_PIX_FMT_NONE
+};
 
 static int config_input(AVFilterLink *inlink)
 {
@@ -83,28 +77,29 @@ static void update_pts(AVFilterLink *link, AVFrame *f, int64_t pts, int fields)
         f->pts = AV_NOPTS_VALUE;
 }
 
-static int filter_frame(AVFilterLink *inlink, AVFrame *in) {
+static int filter_frame(AVFilterLink *inlink, AVFrame *in)
+{
     AVFilterContext *ctx = inlink->dst;
     AVFilterLink *outlink = inlink->dst->outputs[0];
     RepeatFieldsContext *s = ctx->priv;
-    AVFrame *out;
     int ret, i;
     int state = s->state;
 
     if (!s->frame) {
         s->frame = av_frame_clone(in);
-        if (!s->frame)
+        if (!s->frame) {
+            av_frame_free(&in);
             return AVERROR(ENOMEM);
+        }
         s->frame->pts = AV_NOPTS_VALUE;
     }
 
-    out = s->frame;
-
-    if ((state == 0 && !in->top_field_first) ||
-        (state == 1 &&  in->top_field_first)) {
+    if ((state == 0 && !(in->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST)) ||
+        (state == 1 &&  (in->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST))) {
         av_log(ctx, AV_LOG_WARNING, "Unexpected field flags: "
                                     "state=%d top_field_first=%d repeat_first_field=%d\n",
-                                    state, in->top_field_first, in->repeat_pict);
+                                    state, !!(in->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST),
+                                    in->repeat_pict);
         state ^= 1;
     }
 
@@ -112,16 +107,22 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in) {
         AVFrame *new;
 
         new = av_frame_clone(in);
-        if (!new)
+        if (!new) {
+            av_frame_free(&in);
             return AVERROR(ENOMEM);
+        }
 
         ret = ff_filter_frame(outlink, new);
 
         if (in->repeat_pict) {
-            av_frame_make_writable(out);
-            update_pts(outlink, out, in->pts, 2);
+            ret = ff_inlink_make_frame_writable(inlink, &s->frame);
+            if (ret < 0) {
+                av_frame_free(&in);
+                return ret;
+            }
+            update_pts(outlink, s->frame, in->pts, 2);
             for (i = 0; i < s->nb_planes; i++) {
-                av_image_copy_plane(out->data[i], out->linesize[i] * 2,
+                av_image_copy_plane(s->frame->data[i], s->frame->linesize[i] * 2,
                                     in->data[i], in->linesize[i] * 2,
                                     s->linesize[i], s->planeheight[i] / 2);
             }
@@ -129,28 +130,38 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in) {
         }
     } else {
         for (i = 0; i < s->nb_planes; i++) {
-            av_frame_make_writable(out);
-            av_image_copy_plane(out->data[i] + out->linesize[i], out->linesize[i] * 2,
+            ret = ff_inlink_make_frame_writable(inlink, &s->frame);
+            if (ret < 0) {
+                av_frame_free(&in);
+                return ret;
+            }
+            av_image_copy_plane(s->frame->data[i] + s->frame->linesize[i], s->frame->linesize[i] * 2,
                                 in->data[i] + in->linesize[i], in->linesize[i] * 2,
                                 s->linesize[i], s->planeheight[i] / 2);
         }
 
-        ret = ff_filter_frame(outlink, av_frame_clone(out));
+        ret = ff_filter_frame(outlink, av_frame_clone(s->frame));
 
         if (in->repeat_pict) {
             AVFrame *new;
 
             new = av_frame_clone(in);
-            if (!new)
+            if (!new) {
+                av_frame_free(&in);
                 return AVERROR(ENOMEM);
+            }
 
             ret = ff_filter_frame(outlink, new);
             state = 0;
         } else {
-            av_frame_make_writable(out);
-            update_pts(outlink, out, in->pts, 1);
+            ret = ff_inlink_make_frame_writable(inlink, &s->frame);
+            if (ret < 0) {
+                av_frame_free(&in);
+                return ret;
+            }
+            update_pts(outlink, s->frame, in->pts, 1);
             for (i = 0; i < s->nb_planes; i++) {
-                av_image_copy_plane(out->data[i], out->linesize[i] * 2,
+                av_image_copy_plane(s->frame->data[i], s->frame->linesize[i] * 2,
                                     in->data[i], in->linesize[i] * 2,
                                     s->linesize[i], s->planeheight[i] / 2);
             }
@@ -170,23 +181,14 @@ static const AVFilterPad repeatfields_inputs[] = {
         .filter_frame = filter_frame,
         .config_props = config_input,
     },
-    { NULL }
 };
 
-static const AVFilterPad repeatfields_outputs[] = {
-    {
-        .name = "default",
-        .type = AVMEDIA_TYPE_VIDEO,
-    },
-    { NULL }
-};
-
-AVFilter ff_vf_repeatfields = {
+const AVFilter ff_vf_repeatfields = {
     .name          = "repeatfields",
     .description   = NULL_IF_CONFIG_SMALL("Hard repeat fields based on MPEG repeat field flag."),
     .priv_size     = sizeof(RepeatFieldsContext),
     .uninit        = uninit,
-    .inputs        = repeatfields_inputs,
-    .outputs       = repeatfields_outputs,
-    .query_formats = query_formats,
+    FILTER_INPUTS(repeatfields_inputs),
+    FILTER_OUTPUTS(ff_video_default_filterpad),
+    FILTER_PIXFMTS_ARRAY(pixel_fmts_eq),
 };

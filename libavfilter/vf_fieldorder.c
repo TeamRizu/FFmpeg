@@ -40,30 +40,23 @@ typedef struct FieldOrderContext {
 
 static int query_formats(AVFilterContext *ctx)
 {
+    const AVPixFmtDescriptor *desc = NULL;
     AVFilterFormats  *formats;
-    enum AVPixelFormat pix_fmt;
     int              ret;
 
     /** accept any input pixel format that is not hardware accelerated, not
      *  a bitstream format, and does not have vertically sub-sampled chroma */
-    if (ctx->inputs[0]) {
-        const AVPixFmtDescriptor *desc = NULL;
-        formats = NULL;
-        while ((desc = av_pix_fmt_desc_next(desc))) {
-            pix_fmt = av_pix_fmt_desc_get_id(desc);
-            if (!(desc->flags & AV_PIX_FMT_FLAG_HWACCEL ||
-                  desc->flags & AV_PIX_FMT_FLAG_PAL     ||
-                  desc->flags & AV_PIX_FMT_FLAG_BITSTREAM) &&
-                desc->nb_components && !desc->log2_chroma_h &&
-                (ret = ff_add_format(&formats, pix_fmt)) < 0)
-                return ret;
-        }
-        if ((ret = ff_formats_ref(formats, &ctx->inputs[0]->outcfg.formats)) < 0 ||
-            (ret = ff_formats_ref(formats, &ctx->outputs[0]->incfg.formats)) < 0)
+    formats = NULL;
+    while ((desc = av_pix_fmt_desc_next(desc))) {
+        enum AVPixelFormat pix_fmt = av_pix_fmt_desc_get_id(desc);
+        if (!(desc->flags & AV_PIX_FMT_FLAG_HWACCEL ||
+                desc->flags & AV_PIX_FMT_FLAG_PAL     ||
+                desc->flags & AV_PIX_FMT_FLAG_BITSTREAM) &&
+            desc->nb_components && !desc->log2_chroma_h &&
+            (ret = ff_add_format(&formats, pix_fmt)) < 0)
             return ret;
     }
-
-    return 0;
+    return ff_set_common_formats(ctx, formats);
 }
 
 static int config_input(AVFilterLink *inlink)
@@ -83,11 +76,11 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     uint8_t *dst, *src;
     AVFrame *out;
 
-    if (!frame->interlaced_frame ||
-        frame->top_field_first == s->dst_tff) {
+    if (!(frame->flags & AV_FRAME_FLAG_INTERLACED) ||
+        !!(frame->flags & AV_FRAME_FLAG_TOP_FIELD_FIRST) == s->dst_tff) {
         av_log(ctx, AV_LOG_VERBOSE,
                "Skipping %s.\n",
-               frame->interlaced_frame ?
+               (frame->flags & AV_FRAME_FLAG_INTERLACED) ?
                "frame with same field order" : "progressive frame");
         return ff_filter_frame(outlink, frame);
     }
@@ -147,7 +140,15 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
             }
         }
     }
+#if FF_API_INTERLACED_FRAME
+FF_DISABLE_DEPRECATION_WARNINGS
     out->top_field_first = s->dst_tff;
+FF_ENABLE_DEPRECATION_WARNINGS
+#endif
+    if (s->dst_tff)
+        out->flags |= AV_FRAME_FLAG_TOP_FIELD_FIRST;
+    else
+        out->flags &= ~AV_FRAME_FLAG_TOP_FIELD_FIRST;
 
     if (frame != out)
         av_frame_free(&frame);
@@ -158,7 +159,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM
 
 static const AVOption fieldorder_options[] = {
-    { "order", "output field order", OFFSET(dst_tff), AV_OPT_TYPE_INT, { .i64 = 1 }, 0, 1, FLAGS, "order" },
+    { "order", "output field order", OFFSET(dst_tff), AV_OPT_TYPE_INT, { .i64 = 1 }, 0, 1, FLAGS, .unit = "order" },
         { "bff", "bottom field first", 0, AV_OPT_TYPE_CONST, { .i64 = 0 }, .flags=FLAGS, .unit = "order" },
         { "tff", "top field first",    0, AV_OPT_TYPE_CONST, { .i64 = 1 }, .flags=FLAGS, .unit = "order" },
     { NULL }
@@ -173,24 +174,15 @@ static const AVFilterPad avfilter_vf_fieldorder_inputs[] = {
         .config_props = config_input,
         .filter_frame = filter_frame,
     },
-    { NULL }
 };
 
-static const AVFilterPad avfilter_vf_fieldorder_outputs[] = {
-    {
-        .name = "default",
-        .type = AVMEDIA_TYPE_VIDEO,
-    },
-    { NULL }
-};
-
-AVFilter ff_vf_fieldorder = {
+const AVFilter ff_vf_fieldorder = {
     .name          = "fieldorder",
     .description   = NULL_IF_CONFIG_SMALL("Set the field order."),
     .priv_size     = sizeof(FieldOrderContext),
     .priv_class    = &fieldorder_class,
-    .query_formats = query_formats,
-    .inputs        = avfilter_vf_fieldorder_inputs,
-    .outputs       = avfilter_vf_fieldorder_outputs,
+    FILTER_INPUTS(avfilter_vf_fieldorder_inputs),
+    FILTER_OUTPUTS(ff_video_default_filterpad),
+    FILTER_QUERY_FUNC(query_formats),
     .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC,
 };

@@ -21,6 +21,7 @@
 #include "libavutil/common.h"
 #include "libavutil/opt.h"
 #include "internal.h"
+#include "video.h"
 
 typedef struct VFRDETContext {
     const AVClass *class;
@@ -93,23 +94,15 @@ static const AVFilterPad vfrdet_inputs[] = {
         .type         = AVMEDIA_TYPE_VIDEO,
         .filter_frame = filter_frame,
     },
-    { NULL }
 };
 
-static const AVFilterPad vfrdet_outputs[] = {
-    {
-        .name = "default",
-        .type = AVMEDIA_TYPE_VIDEO,
-    },
-    { NULL }
-};
-
-AVFilter ff_vf_vfrdet = {
+const AVFilter ff_vf_vfrdet = {
     .name        = "vfrdet",
     .description = NULL_IF_CONFIG_SMALL("Variable frame rate detect filter."),
     .priv_size   = sizeof(VFRDETContext),
     .init        = init,
     .uninit      = uninit,
-    .inputs      = vfrdet_inputs,
-    .outputs     = vfrdet_outputs,
+    .flags       = AVFILTER_FLAG_METADATA_ONLY,
+    FILTER_INPUTS(vfrdet_inputs),
+    FILTER_OUTPUTS(ff_video_default_filterpad),
 };

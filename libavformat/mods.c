@@ -1,5 +1,7 @@
 /*
  * MODS demuxer
+ * Copyright (c) 2015-2016 Florian Nouwt
+ * Copyright (c) 2017 Adib Surani
  * Copyright (c) 2020 Paul B Mahol
  *
  * This file is part of FFmpeg.
@@ -22,6 +24,7 @@
 #include "libavutil/intreadwrite.h"
 
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 
 static int mods_probe(const AVProbeData *p)
@@ -89,12 +92,12 @@ static int mods_read_packet(AVFormatContext *s, AVPacket *pkt)
     return ret;
 }
 
-AVInputFormat ff_mods_demuxer = {
-    .name           = "mods",
-    .long_name      = NULL_IF_CONFIG_SMALL("MobiClip MODS"),
+const FFInputFormat ff_mods_demuxer = {
+    .p.name         = "mods",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("MobiClip MODS"),
+    .p.extensions   = "mods",
+    .p.flags        = AVFMT_GENERIC_INDEX,
     .read_probe     = mods_probe,
     .read_header    = mods_read_header,
     .read_packet    = mods_read_packet,
-    .extensions     = "mods",
-    .flags          = AVFMT_GENERIC_INDEX,
 };

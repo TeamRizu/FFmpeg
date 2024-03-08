@@ -18,6 +18,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include "config_components.h"
+
 #include "float.h"
 
 #include "libavutil/avstring.h"
@@ -67,22 +69,24 @@ static const AVOption drawgraph_options[] = {
     { "bg", "set background color", OFFSET(bg), AV_OPT_TYPE_COLOR, {.str="white"}, 0, 0, FLAGS },
     { "min", "set minimal value", OFFSET(min), AV_OPT_TYPE_FLOAT, {.dbl=-1.}, INT_MIN, INT_MAX, FLAGS },
     { "max", "set maximal value", OFFSET(max), AV_OPT_TYPE_FLOAT, {.dbl=1.}, INT_MIN, INT_MAX, FLAGS },
-    { "mode", "set graph mode", OFFSET(mode), AV_OPT_TYPE_INT, {.i64=2}, 0, 2, FLAGS, "mode" },
-        {"bar", "draw bars", OFFSET(mode), AV_OPT_TYPE_CONST, {.i64=0}, 0, 0, FLAGS, "mode"},
-        {"dot", "draw dots", OFFSET(mode), AV_OPT_TYPE_CONST, {.i64=1}, 0, 0, FLAGS, "mode"},
-        {"line", "draw lines", OFFSET(mode), AV_OPT_TYPE_CONST, {.i64=2}, 0, 0, FLAGS, "mode"},
-    { "slide", "set slide mode", OFFSET(slide), AV_OPT_TYPE_INT, {.i64=0}, 0, 4, FLAGS, "slide" },
-        {"frame", "draw new frames", OFFSET(slide), AV_OPT_TYPE_CONST, {.i64=0}, 0, 0, FLAGS, "slide"},
-        {"replace", "replace old columns with new", OFFSET(slide), AV_OPT_TYPE_CONST, {.i64=1}, 0, 0, FLAGS, "slide"},
-        {"scroll", "scroll from right to left", OFFSET(slide), AV_OPT_TYPE_CONST, {.i64=2}, 0, 0, FLAGS, "slide"},
-        {"rscroll", "scroll from left to right", OFFSET(slide), AV_OPT_TYPE_CONST, {.i64=3}, 0, 0, FLAGS, "slide"},
-        {"picture", "display graph in single frame", OFFSET(slide), AV_OPT_TYPE_CONST, {.i64=4}, 0, 0, FLAGS, "slide"},
+    { "mode", "set graph mode", OFFSET(mode), AV_OPT_TYPE_INT, {.i64=2}, 0, 2, FLAGS, .unit = "mode" },
+        {"bar", "draw bars", OFFSET(mode), AV_OPT_TYPE_CONST, {.i64=0}, 0, 0, FLAGS, .unit = "mode"},
+        {"dot", "draw dots", OFFSET(mode), AV_OPT_TYPE_CONST, {.i64=1}, 0, 0, FLAGS, .unit = "mode"},
+        {"line", "draw lines", OFFSET(mode), AV_OPT_TYPE_CONST, {.i64=2}, 0, 0, FLAGS, .unit = "mode"},
+    { "slide", "set slide mode", OFFSET(slide), AV_OPT_TYPE_INT, {.i64=0}, 0, 4, FLAGS, .unit = "slide" },
+        {"frame", "draw new frames", OFFSET(slide), AV_OPT_TYPE_CONST, {.i64=0}, 0, 0, FLAGS, .unit = "slide"},
+        {"replace", "replace old columns with new", OFFSET(slide), AV_OPT_TYPE_CONST, {.i64=1}, 0, 0, FLAGS, .unit = "slide"},
+        {"scroll", "scroll from right to left", OFFSET(slide), AV_OPT_TYPE_CONST, {.i64=2}, 0, 0, FLAGS, .unit = "slide"},
+        {"rscroll", "scroll from left to right", OFFSET(slide), AV_OPT_TYPE_CONST, {.i64=3}, 0, 0, FLAGS, .unit = "slide"},
+        {"picture", "display graph in single frame", OFFSET(slide), AV_OPT_TYPE_CONST, {.i64=4}, 0, 0, FLAGS, .unit = "slide"},
     { "size", "set graph size", OFFSET(w), AV_OPT_TYPE_IMAGE_SIZE, {.str="900x256"}, 0, 0, FLAGS },
     { "s", "set graph size", OFFSET(w), AV_OPT_TYPE_IMAGE_SIZE, {.str="900x256"}, 0, 0, FLAGS },
     { "rate", "set video rate", OFFSET(frame_rate), AV_OPT_TYPE_VIDEO_RATE, {.str="25"}, 0, INT_MAX, FLAGS },
     { "r",    "set video rate", OFFSET(frame_rate), AV_OPT_TYPE_VIDEO_RATE, {.str="25"}, 0, INT_MAX, FLAGS },
     { NULL }
 };
+
+AVFILTER_DEFINE_CLASS_EXT(drawgraph, "(a)drawgraph", drawgraph_options);
 
 static const char *const var_names[] = {   "MAX",   "MIN",   "VAL", NULL };
 enum                                   { VAR_MAX, VAR_MIN, VAR_VAL, VAR_VARS_NB };
@@ -164,7 +168,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     AVDictionaryEntry *e;
     AVFrame *out = s->out;
     AVFrame *clone = NULL;
-    int64_t in_pts, out_pts;
+    int64_t in_pts, out_pts, in_duration;
     int i;
 
     if (s->slide == 4 && s->nb_values >= s->values_size[0] / sizeof(float)) {
@@ -316,6 +320,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
     s->x++;
 
     in_pts = in->pts;
+    in_duration = in->duration;
 
     av_frame_free(&in);
 
@@ -332,6 +337,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
         return AVERROR(ENOMEM);
 
     clone->pts = s->prev_pts = out_pts;
+    clone->duration = av_rescale_q(in_duration, inlink->time_base, outlink->time_base);
     return ff_filter_frame(outlink, clone);
 }
 
@@ -448,19 +454,6 @@ static av_cold void uninit(AVFilterContext *ctx)
     av_freep(&s->values[3]);
 }
 
-#if CONFIG_DRAWGRAPH_FILTER
-
-AVFILTER_DEFINE_CLASS(drawgraph);
-
-static const AVFilterPad drawgraph_inputs[] = {
-    {
-        .name         = "default",
-        .type         = AVMEDIA_TYPE_VIDEO,
-        .filter_frame = filter_frame,
-    },
-    { NULL }
-};
-
 static const AVFilterPad drawgraph_outputs[] = {
     {
         .name         = "default",
@@ -468,27 +461,33 @@ static const AVFilterPad drawgraph_outputs[] = {
         .config_props = config_output,
         .request_frame = request_frame,
     },
-    { NULL }
 };
 
-AVFilter ff_vf_drawgraph = {
+#if CONFIG_DRAWGRAPH_FILTER
+
+static const AVFilterPad drawgraph_inputs[] = {
+    {
+        .name         = "default",
+        .type         = AVMEDIA_TYPE_VIDEO,
+        .filter_frame = filter_frame,
+    },
+};
+
+const AVFilter ff_vf_drawgraph = {
     .name          = "drawgraph",
     .description   = NULL_IF_CONFIG_SMALL("Draw a graph using input video metadata."),
     .priv_size     = sizeof(DrawGraphContext),
     .priv_class    = &drawgraph_class,
-    .query_formats = query_formats,
     .init          = init,
     .uninit        = uninit,
-    .inputs        = drawgraph_inputs,
-    .outputs       = drawgraph_outputs,
+    FILTER_INPUTS(drawgraph_inputs),
+    FILTER_OUTPUTS(drawgraph_outputs),
+    FILTER_QUERY_FUNC(query_formats),
 };
 
 #endif // CONFIG_DRAWGRAPH_FILTER
 
 #if CONFIG_ADRAWGRAPH_FILTER
-
-#define adrawgraph_options drawgraph_options
-AVFILTER_DEFINE_CLASS(adrawgraph);
 
 static const AVFilterPad adrawgraph_inputs[] = {
     {
@@ -496,28 +495,17 @@ static const AVFilterPad adrawgraph_inputs[] = {
         .type         = AVMEDIA_TYPE_AUDIO,
         .filter_frame = filter_frame,
     },
-    { NULL }
 };
 
-static const AVFilterPad adrawgraph_outputs[] = {
-    {
-        .name         = "default",
-        .type         = AVMEDIA_TYPE_VIDEO,
-        .config_props = config_output,
-        .request_frame = request_frame,
-    },
-    { NULL }
-};
-
-AVFilter ff_avf_adrawgraph = {
+const AVFilter ff_avf_adrawgraph = {
     .name          = "adrawgraph",
     .description   = NULL_IF_CONFIG_SMALL("Draw a graph using input audio metadata."),
+    .priv_class    = &drawgraph_class,
     .priv_size     = sizeof(DrawGraphContext),
-    .priv_class    = &adrawgraph_class,
-    .query_formats = query_formats,
     .init          = init,
     .uninit        = uninit,
-    .inputs        = adrawgraph_inputs,
-    .outputs       = adrawgraph_outputs,
+    FILTER_INPUTS(adrawgraph_inputs),
+    FILTER_OUTPUTS(drawgraph_outputs),
+    FILTER_QUERY_FUNC(query_formats),
 };
 #endif // CONFIG_ADRAWGRAPH_FILTER

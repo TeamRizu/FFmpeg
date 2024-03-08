@@ -21,6 +21,7 @@
 
 #include "libavutil/intreadwrite.h"
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 #include "pcm.h"
 
@@ -53,9 +54,9 @@ static int avr_read_header(AVFormatContext *s)
 
     chan = avio_rb16(s->pb);
     if (!chan) {
-        st->codecpar->channels = 1;
+        st->codecpar->ch_layout.nb_channels = 1;
     } else if (chan == 0xFFFFu) {
-        st->codecpar->channels = 2;
+        st->codecpar->ch_layout.nb_channels = 2;
     } else {
         avpriv_request_sample(s, "chan %d", chan);
         return AVERROR_PATCHWELCOME;
@@ -70,6 +71,9 @@ static int avr_read_header(AVFormatContext *s)
     avio_skip(s->pb, 1); // replay speed
 
     st->codecpar->sample_rate = avio_rb24(s->pb);
+    if (st->codecpar->sample_rate == 0)
+        return AVERROR_INVALIDDATA;
+
     avio_skip(s->pb, 4 * 3);
     avio_skip(s->pb, 2 * 3);
     avio_skip(s->pb, 20);
@@ -81,19 +85,19 @@ static int avr_read_header(AVFormatContext *s)
         return AVERROR_PATCHWELCOME;
     }
 
-    st->codecpar->block_align = bps * st->codecpar->channels / 8;
+    st->codecpar->block_align = bps * st->codecpar->ch_layout.nb_channels / 8;
 
     avpriv_set_pts_info(st, 64, 1, st->codecpar->sample_rate);
     return 0;
 }
 
-AVInputFormat ff_avr_demuxer = {
-    .name           = "avr",
-    .long_name      = NULL_IF_CONFIG_SMALL("AVR (Audio Visual Research)"),
+const FFInputFormat ff_avr_demuxer = {
+    .p.name         = "avr",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("AVR (Audio Visual Research)"),
+    .p.extensions   = "avr",
+    .p.flags        = AVFMT_GENERIC_INDEX,
     .read_probe     = avr_probe,
     .read_header    = avr_read_header,
     .read_packet    = ff_pcm_read_packet,
     .read_seek      = ff_pcm_read_seek,
-    .extensions     = "avr",
-    .flags          = AVFMT_GENERIC_INDEX,
 };

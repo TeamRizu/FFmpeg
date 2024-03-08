@@ -27,6 +27,7 @@
 #include "libavutil/bswap.h"
 #include "libavutil/intreadwrite.h"
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 
 #define MTV_ASUBCHUNK_DATA_SIZE 500
@@ -185,7 +186,7 @@ static int mtv_read_header(AVFormatContext *s)
     st->codecpar->codec_type      = AVMEDIA_TYPE_AUDIO;
     st->codecpar->codec_id        = AV_CODEC_ID_MP3;
     st->codecpar->bit_rate        = mtv->audio_br;
-    st->need_parsing              = AVSTREAM_PARSE_FULL;
+    ffstream(st)->need_parsing    = AVSTREAM_PARSE_FULL;
 
     // Jump over header
 
@@ -202,7 +203,7 @@ static int mtv_read_packet(AVFormatContext *s, AVPacket *pkt)
     AVIOContext *pb = s->pb;
     int ret;
 
-    if((avio_tell(pb) - s->internal->data_offset + mtv->img_segment_size) % mtv->full_segment_size)
+    if((avio_tell(pb) - ffformatcontext(s)->data_offset + mtv->img_segment_size) % mtv->full_segment_size)
     {
         avio_skip(pb, MTV_AUDIO_PADDING_SIZE);
 
@@ -225,9 +226,9 @@ static int mtv_read_packet(AVFormatContext *s, AVPacket *pkt)
     return ret;
 }
 
-AVInputFormat ff_mtv_demuxer = {
-    .name           = "mtv",
-    .long_name      = NULL_IF_CONFIG_SMALL("MTV"),
+const FFInputFormat ff_mtv_demuxer = {
+    .p.name         = "mtv",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("MTV"),
     .priv_data_size = sizeof(MTVDemuxContext),
     .read_probe     = mtv_probe,
     .read_header    = mtv_read_header,

@@ -60,11 +60,11 @@ static const AVOption haas_options[] = {
     { "level_in",      "set level in",      OFFSET(level_in),         AV_OPT_TYPE_DOUBLE,  {.dbl=1}, 0.015625,  64, A },
     { "level_out",     "set level out",     OFFSET(level_out),        AV_OPT_TYPE_DOUBLE,  {.dbl=1}, 0.015625,  64, A },
     { "side_gain",     "set side gain",     OFFSET(par_side_gain),    AV_OPT_TYPE_DOUBLE,  {.dbl=1}, 0.015625,  64, A },
-    { "middle_source", "set middle source", OFFSET(par_m_source),     AV_OPT_TYPE_INT,     {.i64=2},        0,   3, A, "source" },
-    {   "left",        0,                   0,                        AV_OPT_TYPE_CONST,   {.i64=0},        0,   0, A, "source" },
-    {   "right",       0,                   0,                        AV_OPT_TYPE_CONST,   {.i64=1},        0,   0, A, "source" },
-    {   "mid",         "L+R",               0,                        AV_OPT_TYPE_CONST,   {.i64=2},        0,   0, A, "source" },
-    {   "side",        "L-R",               0,                        AV_OPT_TYPE_CONST,   {.i64=3},        0,   0, A, "source" },
+    { "middle_source", "set middle source", OFFSET(par_m_source),     AV_OPT_TYPE_INT,     {.i64=2},        0,   3, A, .unit = "source" },
+    {   "left",        0,                   0,                        AV_OPT_TYPE_CONST,   {.i64=0},        0,   0, A, .unit = "source" },
+    {   "right",       0,                   0,                        AV_OPT_TYPE_CONST,   {.i64=1},        0,   0, A, .unit = "source" },
+    {   "mid",         "L+R",               0,                        AV_OPT_TYPE_CONST,   {.i64=2},        0,   0, A, .unit = "source" },
+    {   "side",        "L-R",               0,                        AV_OPT_TYPE_CONST,   {.i64=3},        0,   0, A, .unit = "source" },
     { "middle_phase",  "set middle phase",  OFFSET(par_middle_phase), AV_OPT_TYPE_BOOL,    {.i64=0},        0,   1, A },
     { "left_delay",    "set left delay",    OFFSET(par_delay0),       AV_OPT_TYPE_DOUBLE,  {.dbl=2.05},     0,  MAX_HAAS_DELAY, A },
     { "left_balance",  "set left balance",  OFFSET(par_balance0),     AV_OPT_TYPE_DOUBLE,  {.dbl=-1.0},    -1,   1, A },
@@ -87,12 +87,11 @@ static int query_formats(AVFilterContext *ctx)
 
     if ((ret = ff_add_format                 (&formats, AV_SAMPLE_FMT_DBL  )) < 0 ||
         (ret = ff_set_common_formats         (ctx     , formats            )) < 0 ||
-        (ret = ff_add_channel_layout         (&layout , AV_CH_LAYOUT_STEREO)) < 0 ||
+        (ret = ff_add_channel_layout         (&layout , &(AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO)) < 0 ||
         (ret = ff_set_common_channel_layouts (ctx     , layout             )) < 0)
         return ret;
 
-    formats = ff_all_samplerates();
-    return ff_set_common_samplerates(ctx, formats);
+    return ff_set_common_all_samplerates(ctx);
 }
 
 static int config_input(AVFilterLink *inlink)
@@ -205,24 +204,15 @@ static const AVFilterPad inputs[] = {
         .filter_frame = filter_frame,
         .config_props = config_input,
     },
-    { NULL }
 };
 
-static const AVFilterPad outputs[] = {
-    {
-        .name = "default",
-        .type = AVMEDIA_TYPE_AUDIO,
-    },
-    { NULL }
-};
-
-AVFilter ff_af_haas = {
+const AVFilter ff_af_haas = {
     .name           = "haas",
     .description    = NULL_IF_CONFIG_SMALL("Apply Haas Stereo Enhancer."),
-    .query_formats  = query_formats,
     .priv_size      = sizeof(HaasContext),
     .priv_class     = &haas_class,
     .uninit         = uninit,
-    .inputs         = inputs,
-    .outputs        = outputs,
+    FILTER_INPUTS(inputs),
+    FILTER_OUTPUTS(ff_audio_default_filterpad),
+    FILTER_QUERY_FUNC(query_formats),
 };

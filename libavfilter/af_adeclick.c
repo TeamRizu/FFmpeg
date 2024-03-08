@@ -20,10 +20,10 @@
 
 #include "libavutil/audio_fifo.h"
 #include "libavutil/opt.h"
+#include "libavutil/tx.h"
 #include "avfilter.h"
 #include "audio.h"
 #include "filters.h"
-#include "formats.h"
 #include "internal.h"
 
 typedef struct DeclickChannel {
@@ -92,47 +92,26 @@ typedef struct AudioDeclickContext {
 #define AF AV_OPT_FLAG_AUDIO_PARAM|AV_OPT_FLAG_FILTERING_PARAM
 
 static const AVOption adeclick_options[] = {
+    { "window", "set window size",     OFFSET(w),         AV_OPT_TYPE_DOUBLE, {.dbl=55}, 10,  100, AF },
     { "w", "set window size",          OFFSET(w),         AV_OPT_TYPE_DOUBLE, {.dbl=55}, 10,  100, AF },
+    { "overlap", "set window overlap", OFFSET(overlap),   AV_OPT_TYPE_DOUBLE, {.dbl=75}, 50,   95, AF },
     { "o", "set window overlap",       OFFSET(overlap),   AV_OPT_TYPE_DOUBLE, {.dbl=75}, 50,   95, AF },
+    { "arorder", "set autoregression order", OFFSET(ar),  AV_OPT_TYPE_DOUBLE, {.dbl=2},   0,   25, AF },
     { "a", "set autoregression order", OFFSET(ar),        AV_OPT_TYPE_DOUBLE, {.dbl=2},   0,   25, AF },
+    { "threshold", "set threshold",    OFFSET(threshold), AV_OPT_TYPE_DOUBLE, {.dbl=2},   1,  100, AF },
     { "t", "set threshold",            OFFSET(threshold), AV_OPT_TYPE_DOUBLE, {.dbl=2},   1,  100, AF },
+    { "burst", "set burst fusion",     OFFSET(burst),     AV_OPT_TYPE_DOUBLE, {.dbl=2},   0,   10, AF },
     { "b", "set burst fusion",         OFFSET(burst),     AV_OPT_TYPE_DOUBLE, {.dbl=2},   0,   10, AF },
-    { "m", "set overlap method",       OFFSET(method),    AV_OPT_TYPE_INT,    {.i64=0},   0,    1, AF, "m" },
-    { "a", "overlap-add",              0,                 AV_OPT_TYPE_CONST,  {.i64=0},   0,    0, AF, "m" },
-    { "s", "overlap-save",             0,                 AV_OPT_TYPE_CONST,  {.i64=1},   0,    0, AF, "m" },
+    { "method", "set overlap method",  OFFSET(method),    AV_OPT_TYPE_INT,    {.i64=0},   0,    1, AF, .unit = "m" },
+    { "m", "set overlap method",       OFFSET(method),    AV_OPT_TYPE_INT,    {.i64=0},   0,    1, AF, .unit = "m" },
+    { "add", "overlap-add",            0,                 AV_OPT_TYPE_CONST,  {.i64=0},   0,    0, AF, .unit = "m" },
+    { "a", "overlap-add",              0,                 AV_OPT_TYPE_CONST,  {.i64=0},   0,    0, AF, .unit = "m" },
+    { "save", "overlap-save",          0,                 AV_OPT_TYPE_CONST,  {.i64=1},   0,    0, AF, .unit = "m" },
+    { "s", "overlap-save",             0,                 AV_OPT_TYPE_CONST,  {.i64=1},   0,    0, AF, .unit = "m" },
     { NULL }
 };
 
 AVFILTER_DEFINE_CLASS(adeclick);
-
-static int query_formats(AVFilterContext *ctx)
-{
-    AVFilterFormats *formats = NULL;
-    AVFilterChannelLayouts *layouts = NULL;
-    static const enum AVSampleFormat sample_fmts[] = {
-        AV_SAMPLE_FMT_DBLP,
-        AV_SAMPLE_FMT_NONE
-    };
-    int ret;
-
-    formats = ff_make_format_list(sample_fmts);
-    if (!formats)
-        return AVERROR(ENOMEM);
-    ret = ff_set_common_formats(ctx, formats);
-    if (ret < 0)
-        return ret;
-
-    layouts = ff_all_channel_counts();
-    if (!layouts)
-        return AVERROR(ENOMEM);
-
-    ret = ff_set_common_channel_layouts(ctx, layouts);
-    if (ret < 0)
-        return ret;
-
-    formats = ff_all_samplerates();
-    return ff_set_common_samplerates(ctx, formats);
-}
 
 static int config_input(AVFilterLink *inlink)
 {
@@ -141,21 +120,74 @@ static int config_input(AVFilterLink *inlink)
     int i;
 
     s->pts = AV_NOPTS_VALUE;
-    s->window_size = inlink->sample_rate * s->w / 1000.;
-    if (s->window_size < 100)
-        return AVERROR(EINVAL);
+    s->window_size = FFMAX(100, inlink->sample_rate * s->w / 1000.);
     s->ar_order = FFMAX(s->window_size * s->ar / 100., 1);
     s->nb_burst_samples = s->window_size * s->burst / 1000.;
-    s->hop_size = s->window_size * (1. - (s->overlap / 100.));
-    if (s->hop_size < 1)
-        return AVERROR(EINVAL);
+    s->hop_size = FFMAX(1, s->window_size * (1. - (s->overlap / 100.)));
 
     s->window_func_lut = av_calloc(s->window_size, sizeof(*s->window_func_lut));
     if (!s->window_func_lut)
         return AVERROR(ENOMEM);
-    for (i = 0; i < s->window_size; i++)
-        s->window_func_lut[i] = sin(M_PI * i / s->window_size) *
-                                (1. - (s->overlap / 100.)) * M_PI_2;
+
+    {
+        double *tx_in[2], *tx_out[2];
+        AVTXContext *tx, *itx;
+        av_tx_fn tx_fn, itx_fn;
+        int ret, tx_size;
+        double scale;
+
+        tx_size = 1 << (32 - ff_clz(s->window_size));
+
+        scale = 1.0;
+        ret = av_tx_init(&tx, &tx_fn, AV_TX_DOUBLE_RDFT, 0, tx_size, &scale, 0);
+        if (ret < 0)
+            return ret;
+
+        scale = 1.0 / tx_size;
+        ret = av_tx_init(&itx, &itx_fn, AV_TX_DOUBLE_RDFT, 1, tx_size, &scale, 0);
+        if (ret < 0)
+            return ret;
+
+        tx_in[0]  = av_calloc(tx_size + 2, sizeof(*tx_in[0]));
+        tx_in[1]  = av_calloc(tx_size + 2, sizeof(*tx_in[1]));
+        tx_out[0] = av_calloc(tx_size + 2, sizeof(*tx_out[0]));
+        tx_out[1] = av_calloc(tx_size + 2, sizeof(*tx_out[1]));
+        if (!tx_in[0] || !tx_in[1] || !tx_out[0] || !tx_out[1])
+            return AVERROR(ENOMEM);
+
+        for (int n = 0; n < s->window_size - s->hop_size; n++)
+            tx_in[0][n] = 1.0;
+
+        for (int n = 0; n < s->hop_size; n++)
+            tx_in[1][n] = 1.0;
+
+        tx_fn(tx, tx_out[0], tx_in[0], sizeof(double));
+        tx_fn(tx, tx_out[1], tx_in[1], sizeof(double));
+
+        for (int n = 0; n <= tx_size/2; n++) {
+            double re0 = tx_out[0][2*n];
+            double im0 = tx_out[0][2*n+1];
+            double re1 = tx_out[1][2*n];
+            double im1 = tx_out[1][2*n+1];
+
+            tx_in[0][2*n]   = re0 * re1 - im0 * im1;
+            tx_in[0][2*n+1] = re0 * im1 + re1 * im0;
+        }
+
+        itx_fn(itx, tx_out[0], tx_in[0], sizeof(AVComplexDouble));
+
+        scale = 1.0 / (s->window_size - s->hop_size);
+        for (int n = 0; n < s->window_size; n++)
+            s->window_func_lut[n] = tx_out[0][n] * scale;
+
+        av_tx_uninit(&tx);
+        av_tx_uninit(&itx);
+
+        av_freep(&tx_in[0]);
+        av_freep(&tx_in[1]);
+        av_freep(&tx_out[0]);
+        av_freep(&tx_out[1]);
+    }
 
     av_frame_free(&s->in);
     av_frame_free(&s->out);
@@ -172,7 +204,7 @@ static int config_input(AVFilterLink *inlink)
     s->efifo = av_audio_fifo_alloc(inlink->format, 1, s->window_size);
     if (!s->efifo)
         return AVERROR(ENOMEM);
-    s->fifo = av_audio_fifo_alloc(inlink->format, inlink->channels, s->window_size);
+    s->fifo = av_audio_fifo_alloc(inlink->format, inlink->ch_layout.nb_channels, s->window_size);
     if (!s->fifo)
         return AVERROR(ENOMEM);
     s->overlap_skip = s->method ? (s->window_size - s->hop_size) / 2 : 0;
@@ -181,12 +213,12 @@ static int config_input(AVFilterLink *inlink)
                             s->overlap_skip);
     }
 
-    s->nb_channels = inlink->channels;
-    s->chan = av_calloc(inlink->channels, sizeof(*s->chan));
+    s->nb_channels = inlink->ch_layout.nb_channels;
+    s->chan = av_calloc(inlink->ch_layout.nb_channels, sizeof(*s->chan));
     if (!s->chan)
         return AVERROR(ENOMEM);
 
-    for (i = 0; i < inlink->channels; i++) {
+    for (i = 0; i < inlink->ch_layout.nb_channels; i++) {
         DeclickChannel *c = &s->chan[i];
 
         c->detection = av_calloc(s->window_size, sizeof(*c->detection));
@@ -578,11 +610,11 @@ static int filter_frame(AVFilterLink *inlink)
         goto fail;
 
     td.out = out;
-    ret = ctx->internal->execute(ctx, filter_channel, &td, NULL, inlink->channels);
+    ret = ff_filter_execute(ctx, filter_channel, &td, NULL, inlink->ch_layout.nb_channels);
     if (ret < 0)
         goto fail;
 
-    for (ch = 0; ch < s->in->channels; ch++) {
+    for (ch = 0; ch < s->in->ch_layout.nb_channels; ch++) {
         double *is = (double *)s->is->extended_data[ch];
 
         for (j = 0; j < s->hop_size; j++) {
@@ -601,7 +633,7 @@ static int filter_frame(AVFilterLink *inlink)
     s->pts += av_rescale_q(s->hop_size, (AVRational){1, outlink->sample_rate}, outlink->time_base);
 
     s->detected_errors += detected_errors;
-    s->nb_samples += out->nb_samples * inlink->channels;
+    s->nb_samples += out->nb_samples * inlink->ch_layout.nb_channels;
 
     ret = ff_filter_frame(outlink, out);
     if (ret < 0)
@@ -698,9 +730,10 @@ static av_cold void uninit(AVFilterContext *ctx)
     AudioDeclickContext *s = ctx->priv;
     int i;
 
-    av_log(ctx, AV_LOG_INFO, "Detected %s in %"PRId64" of %"PRId64" samples (%g%%).\n",
-           s->is_declip ? "clips" : "clicks", s->detected_errors,
-           s->nb_samples, 100. * s->detected_errors / s->nb_samples);
+    if (s->nb_samples > 0)
+        av_log(ctx, AV_LOG_INFO, "Detected %s in %"PRId64" of %"PRId64" samples (%g%%).\n",
+               s->is_declip ? "clips" : "clicks", s->detected_errors,
+               s->nb_samples, 100. * s->detected_errors / s->nb_samples);
 
     av_audio_fifo_free(s->fifo);
     av_audio_fifo_free(s->efifo);
@@ -743,55 +776,54 @@ static const AVFilterPad inputs[] = {
         .type         = AVMEDIA_TYPE_AUDIO,
         .config_props = config_input,
     },
-    { NULL }
 };
 
-static const AVFilterPad outputs[] = {
-    {
-        .name          = "default",
-        .type          = AVMEDIA_TYPE_AUDIO,
-    },
-    { NULL }
-};
-
-AVFilter ff_af_adeclick = {
+const AVFilter ff_af_adeclick = {
     .name          = "adeclick",
     .description   = NULL_IF_CONFIG_SMALL("Remove impulsive noise from input audio."),
-    .query_formats = query_formats,
     .priv_size     = sizeof(AudioDeclickContext),
     .priv_class    = &adeclick_class,
     .init          = init,
     .activate      = activate,
     .uninit        = uninit,
-    .inputs        = inputs,
-    .outputs       = outputs,
+    FILTER_INPUTS(inputs),
+    FILTER_OUTPUTS(ff_audio_default_filterpad),
+    FILTER_SINGLE_SAMPLEFMT(AV_SAMPLE_FMT_DBLP),
     .flags         = AVFILTER_FLAG_SLICE_THREADS | AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL,
 };
 
 static const AVOption adeclip_options[] = {
-    { "w", "set window size",          OFFSET(w),              AV_OPT_TYPE_DOUBLE, {.dbl=55},     10,  100, AF },
-    { "o", "set window overlap",       OFFSET(overlap),        AV_OPT_TYPE_DOUBLE, {.dbl=75},     50,   95, AF },
-    { "a", "set autoregression order", OFFSET(ar),             AV_OPT_TYPE_DOUBLE, {.dbl=8},       0,   25, AF },
-    { "t", "set threshold",            OFFSET(threshold),      AV_OPT_TYPE_DOUBLE, {.dbl=10},      1,  100, AF },
-    { "n", "set histogram size",       OFFSET(nb_hbins),       AV_OPT_TYPE_INT,    {.i64=1000},  100, 9999, AF },
-    { "m", "set overlap method",       OFFSET(method),         AV_OPT_TYPE_INT,    {.i64=0},       0,    1, AF, "m" },
-    { "a", "overlap-add",              0,                      AV_OPT_TYPE_CONST,  {.i64=0},       0,    0, AF, "m" },
-    { "s", "overlap-save",             0,                      AV_OPT_TYPE_CONST,  {.i64=1},       0,    0, AF, "m" },
+    { "window", "set window size",     OFFSET(w),         AV_OPT_TYPE_DOUBLE, {.dbl=55},     10,  100, AF },
+    { "w", "set window size",          OFFSET(w),         AV_OPT_TYPE_DOUBLE, {.dbl=55},     10,  100, AF },
+    { "overlap", "set window overlap", OFFSET(overlap),   AV_OPT_TYPE_DOUBLE, {.dbl=75},     50,   95, AF },
+    { "o", "set window overlap",       OFFSET(overlap),   AV_OPT_TYPE_DOUBLE, {.dbl=75},     50,   95, AF },
+    { "arorder", "set autoregression order", OFFSET(ar),  AV_OPT_TYPE_DOUBLE, {.dbl=8},       0,   25, AF },
+    { "a", "set autoregression order", OFFSET(ar),        AV_OPT_TYPE_DOUBLE, {.dbl=8},       0,   25, AF },
+    { "threshold", "set threshold",    OFFSET(threshold), AV_OPT_TYPE_DOUBLE, {.dbl=10},      1,  100, AF },
+    { "t", "set threshold",            OFFSET(threshold), AV_OPT_TYPE_DOUBLE, {.dbl=10},      1,  100, AF },
+    { "hsize", "set histogram size",   OFFSET(nb_hbins),  AV_OPT_TYPE_INT,    {.i64=1000},  100, 9999, AF },
+    { "n", "set histogram size",       OFFSET(nb_hbins),  AV_OPT_TYPE_INT,    {.i64=1000},  100, 9999, AF },
+    { "method", "set overlap method",  OFFSET(method),    AV_OPT_TYPE_INT,    {.i64=0},       0,    1, AF, .unit = "m" },
+    { "m", "set overlap method",       OFFSET(method),    AV_OPT_TYPE_INT,    {.i64=0},       0,    1, AF, .unit = "m" },
+    { "add", "overlap-add",            0,                 AV_OPT_TYPE_CONST,  {.i64=0},       0,    0, AF, .unit = "m" },
+    { "a", "overlap-add",              0,                 AV_OPT_TYPE_CONST,  {.i64=0},       0,    0, AF, .unit = "m" },
+    { "save", "overlap-save",          0,                 AV_OPT_TYPE_CONST,  {.i64=1},       0,    0, AF, .unit = "m" },
+    { "s", "overlap-save",             0,                 AV_OPT_TYPE_CONST,  {.i64=1},       0,    0, AF, .unit = "m" },
     { NULL }
 };
 
 AVFILTER_DEFINE_CLASS(adeclip);
 
-AVFilter ff_af_adeclip = {
+const AVFilter ff_af_adeclip = {
     .name          = "adeclip",
     .description   = NULL_IF_CONFIG_SMALL("Remove clipping from input audio."),
-    .query_formats = query_formats,
     .priv_size     = sizeof(AudioDeclickContext),
     .priv_class    = &adeclip_class,
     .init          = init,
     .activate      = activate,
     .uninit        = uninit,
-    .inputs        = inputs,
-    .outputs       = outputs,
+    FILTER_INPUTS(inputs),
+    FILTER_OUTPUTS(ff_audio_default_filterpad),
+    FILTER_SINGLE_SAMPLEFMT(AV_SAMPLE_FMT_DBLP),
     .flags         = AVFILTER_FLAG_SLICE_THREADS | AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL,
 };

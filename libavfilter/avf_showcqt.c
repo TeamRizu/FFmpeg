@@ -19,17 +19,21 @@
  */
 
 #include "config.h"
-#include "libavcodec/avfft.h"
-#include "libavutil/avassert.h"
+#include "libavutil/tx.h"
+#include "libavutil/channel_layout.h"
 #include "libavutil/opt.h"
 #include "libavutil/xga_font_data.h"
 #include "libavutil/eval.h"
 #include "libavutil/pixdesc.h"
 #include "libavutil/time.h"
+#include "audio.h"
 #include "avfilter.h"
+#include "filters.h"
+#include "formats.h"
 #include "internal.h"
 #include "lavfutils.h"
 #include "lswsutils.h"
+#include "video.h"
 
 #if CONFIG_LIBFREETYPE
 #include <ft2build.h>
@@ -51,8 +55,6 @@
     "st(1, if(between(ld(0),0,1), 0.5-0.5*cos(2*PI*ld(0)), 0));" \
     "r(1-ld(1)) + b(ld(1))"
 #define CSCHEME         "1|0.5|0|0|0.5|1"
-#define PTS_STEP 10
-#define PTS_TOLERANCE 1
 
 #define OFFSET(x) offsetof(ShowCQTContext, x)
 #define FLAGS (AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM)
@@ -91,14 +93,14 @@ static const AVOption showcqt_options[] = {
     { "axisfile",     "set axis image", OFFSET(axisfile),  AV_OPT_TYPE_STRING, { .str = NULL },      0, 0, FLAGS },
     { "axis",              "draw axis", OFFSET(axis),        AV_OPT_TYPE_BOOL, { .i64 = 1 },                0, 1,        FLAGS },
     { "text",              "draw axis", OFFSET(axis),        AV_OPT_TYPE_BOOL, { .i64 = 1 },                0, 1,        FLAGS },
-    { "csp",         "set color space", OFFSET(csp),          AV_OPT_TYPE_INT, { .i64 = AVCOL_SPC_UNSPECIFIED }, 0, INT_MAX, FLAGS, "csp" },
-        { "unspecified", "unspecified", 0,                  AV_OPT_TYPE_CONST, { .i64 = AVCOL_SPC_UNSPECIFIED }, 0, 0, FLAGS, "csp" },
-        { "bt709",             "bt709", 0,                  AV_OPT_TYPE_CONST, { .i64 = AVCOL_SPC_BT709 },       0, 0, FLAGS, "csp" },
-        { "fcc",                 "fcc", 0,                  AV_OPT_TYPE_CONST, { .i64 = AVCOL_SPC_FCC },         0, 0, FLAGS, "csp" },
-        { "bt470bg",         "bt470bg", 0,                  AV_OPT_TYPE_CONST, { .i64 = AVCOL_SPC_BT470BG },     0, 0, FLAGS, "csp" },
-        { "smpte170m",     "smpte170m", 0,                  AV_OPT_TYPE_CONST, { .i64 = AVCOL_SPC_SMPTE170M },   0, 0, FLAGS, "csp" },
-        { "smpte240m",     "smpte240m", 0,                  AV_OPT_TYPE_CONST, { .i64 = AVCOL_SPC_SMPTE240M },   0, 0, FLAGS, "csp" },
-        { "bt2020ncl",     "bt2020ncl", 0,                  AV_OPT_TYPE_CONST, { .i64 = AVCOL_SPC_BT2020_NCL },  0, 0, FLAGS, "csp" },
+    { "csp",         "set color space", OFFSET(csp),          AV_OPT_TYPE_INT, { .i64 = AVCOL_SPC_UNSPECIFIED }, 0, INT_MAX, FLAGS, .unit = "csp" },
+        { "unspecified", "unspecified", 0,                  AV_OPT_TYPE_CONST, { .i64 = AVCOL_SPC_UNSPECIFIED }, 0, 0, FLAGS, .unit = "csp" },
+        { "bt709",             "bt709", 0,                  AV_OPT_TYPE_CONST, { .i64 = AVCOL_SPC_BT709 },       0, 0, FLAGS, .unit = "csp" },
+        { "fcc",                 "fcc", 0,                  AV_OPT_TYPE_CONST, { .i64 = AVCOL_SPC_FCC },         0, 0, FLAGS, .unit = "csp" },
+        { "bt470bg",         "bt470bg", 0,                  AV_OPT_TYPE_CONST, { .i64 = AVCOL_SPC_BT470BG },     0, 0, FLAGS, .unit = "csp" },
+        { "smpte170m",     "smpte170m", 0,                  AV_OPT_TYPE_CONST, { .i64 = AVCOL_SPC_SMPTE170M },   0, 0, FLAGS, .unit = "csp" },
+        { "smpte240m",     "smpte240m", 0,                  AV_OPT_TYPE_CONST, { .i64 = AVCOL_SPC_SMPTE240M },   0, 0, FLAGS, .unit = "csp" },
+        { "bt2020ncl",     "bt2020ncl", 0,                  AV_OPT_TYPE_CONST, { .i64 = AVCOL_SPC_BT2020_NCL },  0, 0, FLAGS, .unit = "csp" },
     { "cscheme",    "set color scheme", OFFSET(cscheme),   AV_OPT_TYPE_STRING, { .str = CSCHEME },   0, 0, FLAGS },
     { NULL }
 };
@@ -144,13 +146,13 @@ static void common_uninit(ShowCQTContext *s)
 
     av_frame_free(&s->axis_frame);
     av_frame_free(&s->sono_frame);
-    av_fft_end(s->fft_ctx);
-    s->fft_ctx = NULL;
+    av_tx_uninit(&s->fft_ctx);
     if (s->coeffs)
         for (k = 0; k < s->cqt_len; k++)
             av_freep(&s->coeffs[k].val);
     av_freep(&s->coeffs);
     av_freep(&s->fft_data);
+    av_freep(&s->fft_input);
     av_freep(&s->fft_result);
     av_freep(&s->cqt_result);
     av_freep(&s->attack_data);
@@ -267,15 +269,15 @@ error:
     return ret;
 }
 
-static void cqt_calc(FFTComplex *dst, const FFTComplex *src, const Coeffs *coeffs,
+static void cqt_calc(AVComplexFloat *dst, const AVComplexFloat *src, const Coeffs *coeffs,
                      int len, int fft_len)
 {
     int k, x, i, j;
     for (k = 0; k < len; k++) {
-        FFTComplex l, r, a = {0,0}, b = {0,0};
+        AVComplexFloat l, r, a = {0,0}, b = {0,0};
 
         for (x = 0; x < coeffs[k].len; x++) {
-            FFTSample u = coeffs[k].val[x];
+            float u = coeffs[k].val[x];
             i = coeffs[k].start + x;
             j = fft_len - i;
             a.re += u * src[i].re;
@@ -344,7 +346,7 @@ static int init_cqt(ShowCQTContext *s)
     }
 
     av_expr_free(expr);
-    av_log(s->ctx, AV_LOG_INFO, "nb_cqt_coeffs = %d.\n", nb_cqt_coeffs);
+    av_log(s->ctx, AV_LOG_VERBOSE, "nb_cqt_coeffs = %d.\n", nb_cqt_coeffs);
     return 0;
 
 error:
@@ -730,7 +732,7 @@ static float calculate_gamma(float v, float g)
     return expf(logf(v) / g);
 }
 
-static void rgb_from_cqt(ColorFloat *c, const FFTComplex *v, float g, int len, float cscheme[6])
+static void rgb_from_cqt(ColorFloat *c, const AVComplexFloat *v, float g, int len, float cscheme[6])
 {
     int x;
     for (x = 0; x < len; x++) {
@@ -740,7 +742,7 @@ static void rgb_from_cqt(ColorFloat *c, const FFTComplex *v, float g, int len, f
     }
 }
 
-static void yuv_from_cqt(ColorFloat *c, const FFTComplex *v, float gamma, int len, float cm[3][3], float cscheme[6])
+static void yuv_from_cqt(ColorFloat *c, const AVComplexFloat *v, float gamma, int len, float cm[3][3], float cscheme[6])
 {
     int x;
     for (x = 0; x < len; x++) {
@@ -1031,16 +1033,17 @@ static void draw_sono(AVFrame *out, AVFrame *sono, int off, int idx)
     int nb_planes = (fmt == AV_PIX_FMT_RGB24) ? 1 : 3;
     int offh = (fmt == AV_PIX_FMT_YUV420P) ? off / 2 : off;
     int inc = (fmt == AV_PIX_FMT_YUV420P) ? 2 : 1;
-    int ls, i, y, yh;
+    ptrdiff_t ls;
+    int i, y, yh;
 
-    ls = FFMIN(out->linesize[0], sono->linesize[0]);
+    ls = FFABS(FFMIN(out->linesize[0], sono->linesize[0]));
     for (y = 0; y < h; y++) {
         memcpy(out->data[0] + (off + y) * out->linesize[0],
                sono->data[0] + (idx + y) % h * sono->linesize[0], ls);
     }
 
     for (i = 1; i < nb_planes; i++) {
-        ls = FFMIN(out->linesize[i], sono->linesize[i]);
+        ls = FFABS(FFMIN(out->linesize[i], sono->linesize[i]));
         for (y = 0; y < h; y += inc) {
             yh = (fmt == AV_PIX_FMT_YUV420P) ? y / 2 : y;
             memcpy(out->data[i] + (offh + yh) * out->linesize[i],
@@ -1110,7 +1113,7 @@ static void process_cqt(ShowCQTContext *s)
     if (s->fcount > 1) {
         float rcp_fcount = 1.0f / s->fcount;
         for (x = 0; x < s->width; x++) {
-            FFTComplex result = {0.0f, 0.0f};
+            AVComplexFloat result = {0.0f, 0.0f};
             for (i = 0; i < s->fcount; i++) {
                 result.re += s->cqt_result[s->fcount * x + i].re;
                 result.im += s->cqt_result[s->fcount * x + i].im;
@@ -1133,24 +1136,22 @@ static int plot_cqt(AVFilterContext *ctx, AVFrame **frameout)
     int64_t last_time, cur_time;
 
 #define UPDATE_TIME(t) \
-    cur_time = av_gettime(); \
+    cur_time = av_gettime_relative(); \
     t += cur_time - last_time; \
     last_time = cur_time
 
-    last_time = av_gettime();
+    last_time = av_gettime_relative();
 
-    memcpy(s->fft_result, s->fft_data, s->fft_len * sizeof(*s->fft_data));
+    memcpy(s->fft_input, s->fft_data, s->fft_len * sizeof(*s->fft_data));
     if (s->attack_data) {
         int k;
         for (k = 0; k < s->remaining_fill_max; k++) {
-            s->fft_result[s->fft_len/2+k].re *= s->attack_data[k];
-            s->fft_result[s->fft_len/2+k].im *= s->attack_data[k];
+            s->fft_input[s->fft_len/2+k].re *= s->attack_data[k];
+            s->fft_input[s->fft_len/2+k].im *= s->attack_data[k];
         }
     }
 
-    av_fft_permute(s->fft_ctx, s->fft_result);
-    av_fft_calc(s->fft_ctx, s->fft_result);
-    s->fft_result[s->fft_len] = s->fft_result[0];
+    s->tx_fn(s->fft_ctx, s->fft_result, s->fft_input, sizeof(AVComplexFloat));
     UPDATE_TIME(s->fft_time);
 
     s->cqt_calc(s->cqt_result, s->fft_result, s->coeffs, s->cqt_len, s->fft_len);
@@ -1187,8 +1188,6 @@ static int plot_cqt(AVFilterContext *ctx, AVFrame **frameout)
             s->draw_sono(out, s->sono_frame, s->bar_h + s->axis_h, s->sono_idx);
             UPDATE_TIME(s->sono_time);
         }
-        out->pts = s->next_pts;
-        s->next_pts += PTS_STEP;
     }
     s->sono_count = (s->sono_count + 1) % s->count;
     if (s->sono_h)
@@ -1326,7 +1325,8 @@ static int query_formats(AVFilterContext *ctx)
         AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV422P,
         AV_PIX_FMT_YUV444P, AV_PIX_FMT_RGB24, AV_PIX_FMT_NONE
     };
-    static const int64_t channel_layouts[] = { AV_CH_LAYOUT_STEREO, AV_CH_LAYOUT_STEREO_DOWNMIX, -1 };
+    static const AVChannelLayout channel_layouts[] = { AV_CHANNEL_LAYOUT_STEREO,
+                                                       AV_CHANNEL_LAYOUT_STEREO_DOWNMIX, { 0 } };
     int ret;
 
     /* set input audio formats */
@@ -1334,7 +1334,7 @@ static int query_formats(AVFilterContext *ctx)
     if ((ret = ff_formats_ref(formats, &inlink->outcfg.formats)) < 0)
         return ret;
 
-    layouts = ff_make_format64_list(channel_layouts);
+    layouts = ff_make_channel_layout_list(channel_layouts);
     if ((ret = ff_channel_layouts_ref(layouts, &inlink->outcfg.channel_layouts)) < 0)
         return ret;
 
@@ -1355,6 +1355,7 @@ static int config_output(AVFilterLink *outlink)
     AVFilterContext *ctx = outlink->src;
     AVFilterLink *inlink = ctx->inputs[0];
     ShowCQTContext *s = ctx->priv;
+    float scale = 1.f;
     int ret;
 
     common_uninit(s);
@@ -1364,8 +1365,8 @@ static int config_output(AVFilterLink *outlink)
     s->format = outlink->format;
     outlink->sample_aspect_ratio = av_make_q(1, 1);
     outlink->frame_rate = s->rate;
-    outlink->time_base = av_mul_q(av_inv_q(s->rate), av_make_q(1, PTS_STEP));
-    av_log(ctx, AV_LOG_INFO, "video: %dx%d %s %d/%d fps, bar_h = %d, axis_h = %d, sono_h = %d.\n",
+    outlink->time_base = av_inv_q(s->rate);
+    av_log(ctx, AV_LOG_VERBOSE, "video: %dx%d %s %d/%d fps, bar_h = %d, axis_h = %d, sono_h = %d.\n",
            s->width, s->height, av_get_pix_fmt_name(s->format), s->rate.num, s->rate.den,
            s->bar_h, s->axis_h, s->sono_h);
 
@@ -1378,11 +1379,12 @@ static int config_output(AVFilterLink *outlink)
 
     s->fft_bits = FFMAX(ceil(log2(inlink->sample_rate * s->timeclamp)), 4);
     s->fft_len = 1 << s->fft_bits;
-    av_log(ctx, AV_LOG_INFO, "fft_len = %d, cqt_len = %d.\n", s->fft_len, s->cqt_len);
+    av_log(ctx, AV_LOG_VERBOSE, "fft_len = %d, cqt_len = %d.\n", s->fft_len, s->cqt_len);
 
-    s->fft_ctx = av_fft_init(s->fft_bits, 0);
+    ret = av_tx_init(&s->fft_ctx, &s->tx_fn, AV_TX_FLOAT_FFT, 0, s->fft_len, &scale, 0);
     s->fft_data = av_calloc(s->fft_len, sizeof(*s->fft_data));
-    s->fft_result = av_calloc(s->fft_len + 64, sizeof(*s->fft_result));
+    s->fft_input = av_calloc(FFALIGN(s->fft_len + 64, 256), sizeof(*s->fft_input));
+    s->fft_result = av_calloc(FFALIGN(s->fft_len + 64, 256), sizeof(*s->fft_result));
     s->cqt_result = av_malloc_array(s->cqt_len, sizeof(*s->cqt_result));
     if (!s->fft_ctx || !s->fft_data || !s->fft_result || !s->cqt_result)
         return AVERROR(ENOMEM);
@@ -1416,8 +1418,9 @@ static int config_output(AVFilterLink *outlink)
         s->update_sono = update_sono_yuv;
     }
 
-    if (ARCH_X86)
-        ff_showcqt_init_x86(s);
+#if ARCH_X86
+    ff_showcqt_init_x86(s);
+#endif
 
     if ((ret = init_cqt(s)) < 0)
         return ret;
@@ -1466,11 +1469,10 @@ static int config_output(AVFilterLink *outlink)
     s->step = (int)(s->step_frac.num / s->step_frac.den);
     s->step_frac.num %= s->step_frac.den;
     if (s->step_frac.num) {
-        av_log(ctx, AV_LOG_INFO, "audio: %d Hz, step = %d + %d/%d.\n",
+        av_log(ctx, AV_LOG_VERBOSE, "audio: %d Hz, step = %d + %d/%d.\n",
                inlink->sample_rate, s->step, s->step_frac.num, s->step_frac.den);
-        av_log(ctx, AV_LOG_WARNING, "fractional step.\n");
     } else {
-        av_log(ctx, AV_LOG_INFO, "audio: %d Hz, step = %d.\n",
+        av_log(ctx, AV_LOG_VERBOSE, "audio: %d Hz, step = %d.\n",
                inlink->sample_rate, s->step);
     }
 
@@ -1483,7 +1485,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *insamples)
     AVFilterContext *ctx = inlink->dst;
     AVFilterLink *outlink = ctx->outputs[0];
     ShowCQTContext *s = ctx->priv;
-    int remaining, step, ret, x, i, j, m;
+    int remaining, step, ret, x, i, j, m, got_frame = 0;
     float *audio_data;
     AVFrame *out = NULL;
 
@@ -1499,11 +1501,15 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *insamples)
             for (x = 0; x < (s->fft_len/2 + s->remaining_fill_max - step); x++)
                 s->fft_data[x] = s->fft_data[x+step];
             s->remaining_fill += step;
+            s->next_pts++;
 
-            if (out)
+            if (out) {
+                out->pts = s->next_pts;
+                out->duration = 1;
                 return ff_filter_frame(outlink, out);
+            }
         }
-        return AVERROR_EOF;
+        return 0;
     }
 
     remaining = insamples->nb_samples;
@@ -1524,16 +1530,11 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *insamples)
             }
             remaining -= s->remaining_fill;
             if (out) {
-                int64_t pts = av_rescale_q(insamples->pts, inlink->time_base, av_make_q(1, inlink->sample_rate));
-                pts += insamples->nb_samples - remaining - s->remaining_fill_max;
-                pts = av_rescale_q(pts, av_make_q(1, inlink->sample_rate), outlink->time_base);
-                if (FFABS(pts - out->pts) > PTS_TOLERANCE) {
-                    av_log(ctx, AV_LOG_DEBUG, "changing pts from %"PRId64" (%.3f) to %"PRId64" (%.3f).\n",
-                           out->pts, out->pts * av_q2d(outlink->time_base),
-                           pts, pts * av_q2d(outlink->time_base));
-                    out->pts = pts;
-                    s->next_pts = pts + PTS_STEP;
-                }
+                int64_t pts = av_rescale_q(insamples->nb_samples - remaining - s->remaining_fill_max,
+                                           av_make_q(1, inlink->sample_rate), inlink->time_base);
+                out->pts = av_rescale_q(insamples->pts + pts, inlink->time_base, outlink->time_base);
+                out->duration = 1;
+                got_frame = 1;
                 ret = ff_filter_frame(outlink, out);
                 if (ret < 0) {
                     av_frame_free(&insamples);
@@ -1555,48 +1556,61 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *insamples)
             remaining = 0;
         }
     }
+    if (!got_frame)
+        ff_filter_set_ready(ctx, 100);
     av_frame_free(&insamples);
     return 0;
 }
 
-static int request_frame(AVFilterLink *outlink)
+static int activate(AVFilterContext *ctx)
 {
-    AVFilterLink *inlink = outlink->src->inputs[0];
-    int ret;
+    AVFilterLink *inlink = ctx->inputs[0];
+    AVFilterLink *outlink = ctx->outputs[0];
+    ShowCQTContext *s = ctx->priv;
+    int nb_samples, ret, status;
+    int64_t pts;
+    AVFrame *in;
 
-    ret = ff_request_frame(inlink);
-    if (ret == AVERROR_EOF)
-        ret = filter_frame(inlink, NULL);
-    return ret;
+    FF_FILTER_FORWARD_STATUS_BACK(outlink, inlink);
+
+    nb_samples = s->step + (s->step_frac.num + s->remaining_frac) / s->step_frac.den;
+    ret = ff_inlink_consume_samples(inlink, nb_samples, nb_samples, &in);
+    if (ret < 0)
+        return ret;
+    if (ret > 0)
+        return filter_frame(inlink, in);
+
+    if (ff_inlink_acknowledge_status(inlink, &status, &pts)) {
+        if (status == AVERROR_EOF) {
+            s->next_pts = av_rescale_q(pts, inlink->time_base, outlink->time_base);
+            ret = filter_frame(inlink, NULL);
+            ff_outlink_set_status(outlink, AVERROR_EOF, s->next_pts);
+            return ret;
+        }
+    }
+
+    FF_FILTER_FORWARD_WANTED(outlink, inlink);
+
+    return FFERROR_NOT_READY;
 }
-
-static const AVFilterPad showcqt_inputs[] = {
-    {
-        .name         = "default",
-        .type         = AVMEDIA_TYPE_AUDIO,
-        .filter_frame = filter_frame,
-    },
-    { NULL }
-};
 
 static const AVFilterPad showcqt_outputs[] = {
     {
         .name          = "default",
         .type          = AVMEDIA_TYPE_VIDEO,
         .config_props  = config_output,
-        .request_frame = request_frame,
     },
-    { NULL }
 };
 
-AVFilter ff_avf_showcqt = {
+const AVFilter ff_avf_showcqt = {
     .name          = "showcqt",
     .description   = NULL_IF_CONFIG_SMALL("Convert input audio to a CQT (Constant/Clamped Q Transform) spectrum video output."),
     .init          = init,
+    .activate      = activate,
     .uninit        = uninit,
-    .query_formats = query_formats,
     .priv_size     = sizeof(ShowCQTContext),
-    .inputs        = showcqt_inputs,
-    .outputs       = showcqt_outputs,
+    FILTER_INPUTS(ff_audio_default_filterpad),
+    FILTER_OUTPUTS(showcqt_outputs),
+    FILTER_QUERY_FUNC(query_formats),
     .priv_class    = &showcqt_class,
 };

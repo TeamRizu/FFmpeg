@@ -53,9 +53,9 @@ static const AVOption framerate_options[] = {
     {"interp_end",          "point to end linear interpolation",      OFFSET(interp_end),      AV_OPT_TYPE_INT,      {.i64=240},                0,       255,     V|F },
     {"scene",               "scene change level",                     OFFSET(scene_score),     AV_OPT_TYPE_DOUBLE,   {.dbl=8.2},                0,       100., V|F },
 
-    {"flags",               "set flags",                              OFFSET(flags),           AV_OPT_TYPE_FLAGS,    {.i64=1},                  0,       INT_MAX, V|F, "flags" },
-    {"scene_change_detect", "enable scene change detection",          0,                       AV_OPT_TYPE_CONST,    {.i64=FRAMERATE_FLAG_SCD}, INT_MIN, INT_MAX, V|F, "flags" },
-    {"scd",                 "enable scene change detection",          0,                       AV_OPT_TYPE_CONST,    {.i64=FRAMERATE_FLAG_SCD}, INT_MIN, INT_MAX, V|F, "flags" },
+    {"flags",               "set flags",                              OFFSET(flags),           AV_OPT_TYPE_FLAGS,    {.i64=1},                  0,       INT_MAX, V|F, .unit = "flags" },
+    {"scene_change_detect", "enable scene change detection",          0,                       AV_OPT_TYPE_CONST,    {.i64=FRAMERATE_FLAG_SCD}, INT_MIN, INT_MAX, V|F, .unit = "flags" },
+    {"scd",                 "enable scene change detection",          0,                       AV_OPT_TYPE_CONST,    {.i64=FRAMERATE_FLAG_SCD}, INT_MIN, INT_MAX, V|F, .unit = "flags" },
 
     {NULL}
 };
@@ -76,7 +76,6 @@ static double get_scene_score(AVFilterContext *ctx, AVFrame *crnt, AVFrame *next
 
         ff_dlog(ctx, "get_scene_score() process\n");
         s->sad(crnt->data[0], crnt->linesize[0], next->data[0], next->linesize[0], crnt->width, crnt->height, &sad);
-        emms_c();
         mafd = (double)sad * 100.0 / (crnt->width * crnt->height) / (1 << s->bitdepth);
         diff = fabs(mafd - s->prev_mafd);
         ret  = av_clipf(FFMIN(mafd, diff), 0, 100.0);
@@ -146,7 +145,8 @@ static int blend_frames(AVFilterContext *ctx, int interpolate)
         av_frame_copy_props(s->work, s->f0);
 
         ff_dlog(ctx, "blend_frames() INTERPOLATE to create work frame\n");
-        ctx->internal->execute(ctx, filter_slice, &td, NULL, FFMIN(FFMAX(1, outlink->h >> 2), ff_filter_get_nb_threads(ctx)));
+        ff_filter_execute(ctx, filter_slice, &td, NULL,
+                          FFMIN(FFMAX(1, outlink->h >> 2), ff_filter_get_nb_threads(ctx)));
         return 1;
     }
     return 0;
@@ -170,7 +170,9 @@ static int process_work_frame(AVFilterContext *ctx)
         return 0;
 
     if (!s->f0) {
-        s->work = av_frame_clone(s->f1);
+        av_assert1(s->flush);
+        s->work = s->f1;
+        s->f1 = NULL;
     } else {
         if (work_pts >= s->pts1 + s->delta && s->flush)
             return 0;
@@ -214,26 +216,18 @@ static av_cold void uninit(AVFilterContext *ctx)
     av_frame_free(&s->f1);
 }
 
-static int query_formats(AVFilterContext *ctx)
-{
-    static const enum AVPixelFormat pix_fmts[] = {
-        AV_PIX_FMT_YUV410P,
-        AV_PIX_FMT_YUV411P, AV_PIX_FMT_YUVJ411P,
-        AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUVJ420P,
-        AV_PIX_FMT_YUV422P, AV_PIX_FMT_YUVJ422P,
-        AV_PIX_FMT_YUV440P, AV_PIX_FMT_YUVJ440P,
-        AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUVJ444P,
-        AV_PIX_FMT_YUV420P9, AV_PIX_FMT_YUV420P10, AV_PIX_FMT_YUV420P12,
-        AV_PIX_FMT_YUV422P9, AV_PIX_FMT_YUV422P10, AV_PIX_FMT_YUV422P12,
-        AV_PIX_FMT_YUV444P9, AV_PIX_FMT_YUV444P10, AV_PIX_FMT_YUV444P12,
-        AV_PIX_FMT_NONE
-    };
-
-    AVFilterFormats *fmts_list = ff_make_format_list(pix_fmts);
-    if (!fmts_list)
-        return AVERROR(ENOMEM);
-    return ff_set_common_formats(ctx, fmts_list);
-}
+static const enum AVPixelFormat pix_fmts[] = {
+    AV_PIX_FMT_YUV410P,
+    AV_PIX_FMT_YUV411P, AV_PIX_FMT_YUVJ411P,
+    AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUVJ420P,
+    AV_PIX_FMT_YUV422P, AV_PIX_FMT_YUVJ422P,
+    AV_PIX_FMT_YUV440P, AV_PIX_FMT_YUVJ440P,
+    AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUVJ444P,
+    AV_PIX_FMT_YUV420P9, AV_PIX_FMT_YUV420P10, AV_PIX_FMT_YUV420P12,
+    AV_PIX_FMT_YUV422P9, AV_PIX_FMT_YUV422P10, AV_PIX_FMT_YUV422P12,
+    AV_PIX_FMT_YUV444P9, AV_PIX_FMT_YUV444P10, AV_PIX_FMT_YUV444P12,
+    AV_PIX_FMT_NONE
+};
 
 #define BLEND_FRAME_FUNC(nbits)                         \
 static void blend_frames##nbits##_c(BLEND_FUNC_PARAMS)  \
@@ -269,8 +263,9 @@ void ff_framerate_init(FrameRateContext *s)
         s->blend_factor_max = 1 << BLEND_FACTOR_DEPTH(16);
         s->blend = blend_frames16_c;
     }
-    if (ARCH_X86)
-        ff_framerate_init_x86(s);
+#if ARCH_X86
+    ff_framerate_init_x86(s);
+#endif
 }
 
 static int config_input(AVFilterLink *inlink)
@@ -322,7 +317,7 @@ retry:
         return ret;
 
     if (inpicref) {
-        if (inpicref->interlaced_frame)
+        if (inpicref->flags & AV_FRAME_FLAG_INTERLACED)
             av_log(ctx, AV_LOG_WARNING, "Interlaced frame found - the output will not be correct.\n");
 
         if (inpicref->pts == AV_NOPTS_VALUE) {
@@ -427,7 +422,6 @@ static const AVFilterPad framerate_inputs[] = {
         .type         = AVMEDIA_TYPE_VIDEO,
         .config_props = config_input,
     },
-    { NULL }
 };
 
 static const AVFilterPad framerate_outputs[] = {
@@ -436,19 +430,18 @@ static const AVFilterPad framerate_outputs[] = {
         .type          = AVMEDIA_TYPE_VIDEO,
         .config_props  = config_output,
     },
-    { NULL }
 };
 
-AVFilter ff_vf_framerate = {
+const AVFilter ff_vf_framerate = {
     .name          = "framerate",
     .description   = NULL_IF_CONFIG_SMALL("Upsamples or downsamples progressive source between specified frame rates."),
     .priv_size     = sizeof(FrameRateContext),
     .priv_class    = &framerate_class,
     .init          = init,
     .uninit        = uninit,
-    .query_formats = query_formats,
-    .inputs        = framerate_inputs,
-    .outputs       = framerate_outputs,
+    FILTER_INPUTS(framerate_inputs),
+    FILTER_OUTPUTS(framerate_outputs),
+    FILTER_PIXFMTS_ARRAY(pix_fmts),
     .flags         = AVFILTER_FLAG_SLICE_THREADS,
     .activate      = activate,
 };

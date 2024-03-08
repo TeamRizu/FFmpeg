@@ -22,6 +22,7 @@
 #include "libavutil/intreadwrite.h"
 #include "libavutil/intfloat.h"
 #include "avformat.h"
+#include "demux.h"
 #include "riff.h"
 
 static int read_probe(const AVProbeData *p)
@@ -50,7 +51,7 @@ static int read_header(AVFormatContext *s)
     if (!st)
         return AVERROR(ENOMEM);
 
-    st->need_parsing = AVSTREAM_PARSE_HEADERS;
+    ffstream(st)->need_parsing = AVSTREAM_PARSE_HEADERS;
     st->start_time = 0;
     st->nb_frames  =
     st->duration   = avio_rb32(pb);
@@ -96,11 +97,11 @@ static int read_packet(AVFormatContext *s, AVPacket *pkt)
     return ret;
 }
 
-AVInputFormat ff_mgsts_demuxer = {
-    .name        = "mgsts",
-    .long_name   = NULL_IF_CONFIG_SMALL("Metal Gear Solid: The Twin Snakes"),
+const FFInputFormat ff_mgsts_demuxer = {
+    .p.name      = "mgsts",
+    .p.long_name = NULL_IF_CONFIG_SMALL("Metal Gear Solid: The Twin Snakes"),
+    .p.flags     = AVFMT_GENERIC_INDEX,
     .read_probe  = read_probe,
     .read_header = read_header,
     .read_packet = read_packet,
-    .flags       = AVFMT_GENERIC_INDEX,
 };

@@ -158,63 +158,63 @@ typedef struct Stereo3DContext {
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM
 
 static const AVOption stereo3d_options[] = {
-    { "in",    "set input format",  OFFSET(in.format),   AV_OPT_TYPE_INT,   {.i64=SIDE_BY_SIDE_LR}, INTERLEAVE_ROWS_LR, STEREO_CODE_COUNT-1, FLAGS, "in"},
-    { "ab2l",  "above below half height left first",  0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_LR},   0, 0, FLAGS, "in" },
-    { "tb2l",  "above below half height left first",  0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_LR},   0, 0, FLAGS, "in" },
-    { "ab2r",  "above below half height right first", 0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_RL},   0, 0, FLAGS, "in" },
-    { "tb2r",  "above below half height right first", 0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_RL},   0, 0, FLAGS, "in" },
-    { "abl",   "above below left first",              0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_LR},     0, 0, FLAGS, "in" },
-    { "tbl",   "above below left first",              0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_LR},     0, 0, FLAGS, "in" },
-    { "abr",   "above below right first",             0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_RL},     0, 0, FLAGS, "in" },
-    { "tbr",   "above below right first",             0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_RL},     0, 0, FLAGS, "in" },
-    { "al",    "alternating frames left first",       0, AV_OPT_TYPE_CONST, {.i64=ALTERNATING_LR},     0, 0, FLAGS, "in" },
-    { "ar",    "alternating frames right first",      0, AV_OPT_TYPE_CONST, {.i64=ALTERNATING_RL},     0, 0, FLAGS, "in" },
-    { "sbs2l", "side by side half width left first",  0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_2_LR},  0, 0, FLAGS, "in" },
-    { "sbs2r", "side by side half width right first", 0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_2_RL},  0, 0, FLAGS, "in" },
-    { "sbsl",  "side by side left first",             0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_LR},    0, 0, FLAGS, "in" },
-    { "sbsr",  "side by side right first",            0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_RL},    0, 0, FLAGS, "in" },
-    { "irl",   "interleave rows left first",          0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_ROWS_LR}, 0, 0, FLAGS, "in" },
-    { "irr",   "interleave rows right first",         0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_ROWS_RL}, 0, 0, FLAGS, "in" },
-    { "icl",   "interleave columns left first",       0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_COLS_LR}, 0, 0, FLAGS, "in" },
-    { "icr",   "interleave columns right first",      0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_COLS_RL}, 0, 0, FLAGS, "in" },
-    { "out",   "set output format", OFFSET(out.format),  AV_OPT_TYPE_INT,   {.i64=ANAGLYPH_RC_DUBOIS}, 0, STEREO_CODE_COUNT-1, FLAGS, "out"},
-    { "ab2l",  "above below half height left first",  0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_LR},   0, 0, FLAGS, "out" },
-    { "tb2l",  "above below half height left first",  0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_LR},   0, 0, FLAGS, "out" },
-    { "ab2r",  "above below half height right first", 0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_RL},   0, 0, FLAGS, "out" },
-    { "tb2r",  "above below half height right first", 0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_RL},   0, 0, FLAGS, "out" },
-    { "abl",   "above below left first",              0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_LR},     0, 0, FLAGS, "out" },
-    { "tbl",   "above below left first",              0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_LR},     0, 0, FLAGS, "out" },
-    { "abr",   "above below right first",             0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_RL},     0, 0, FLAGS, "out" },
-    { "tbr",   "above below right first",             0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_RL},     0, 0, FLAGS, "out" },
-    { "agmc",  "anaglyph green magenta color",        0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_GM_COLOR},  0, 0, FLAGS, "out" },
-    { "agmd",  "anaglyph green magenta dubois",       0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_GM_DUBOIS}, 0, 0, FLAGS, "out" },
-    { "agmg",  "anaglyph green magenta gray",         0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_GM_GRAY},   0, 0, FLAGS, "out" },
-    { "agmh",  "anaglyph green magenta half color",   0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_GM_HALF},   0, 0, FLAGS, "out" },
-    { "al",    "alternating frames left first",       0, AV_OPT_TYPE_CONST, {.i64=ALTERNATING_LR},     0, 0, FLAGS, "out" },
-    { "ar",    "alternating frames right first",      0, AV_OPT_TYPE_CONST, {.i64=ALTERNATING_RL},     0, 0, FLAGS, "out" },
-    { "arbg",  "anaglyph red blue gray",              0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RB_GRAY},   0, 0, FLAGS, "out" },
-    { "arcc",  "anaglyph red cyan color",             0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RC_COLOR},  0, 0, FLAGS, "out" },
-    { "arcd",  "anaglyph red cyan dubois",            0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RC_DUBOIS}, 0, 0, FLAGS, "out" },
-    { "arcg",  "anaglyph red cyan gray",              0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RC_GRAY},   0, 0, FLAGS, "out" },
-    { "arch",  "anaglyph red cyan half color",        0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RC_HALF},   0, 0, FLAGS, "out" },
-    { "argg",  "anaglyph red green gray",             0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RG_GRAY},   0, 0, FLAGS, "out" },
-    { "aybc",  "anaglyph yellow blue color",          0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_YB_COLOR},  0, 0, FLAGS, "out" },
-    { "aybd",  "anaglyph yellow blue dubois",         0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_YB_DUBOIS}, 0, 0, FLAGS, "out" },
-    { "aybg",  "anaglyph yellow blue gray",           0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_YB_GRAY},   0, 0, FLAGS, "out" },
-    { "aybh",  "anaglyph yellow blue half color",     0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_YB_HALF},   0, 0, FLAGS, "out" },
-    { "irl",   "interleave rows left first",          0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_ROWS_LR}, 0, 0, FLAGS, "out" },
-    { "irr",   "interleave rows right first",         0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_ROWS_RL}, 0, 0, FLAGS, "out" },
-    { "ml",    "mono left",                           0, AV_OPT_TYPE_CONST, {.i64=MONO_L},             0, 0, FLAGS, "out" },
-    { "mr",    "mono right",                          0, AV_OPT_TYPE_CONST, {.i64=MONO_R},             0, 0, FLAGS, "out" },
-    { "sbs2l", "side by side half width left first",  0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_2_LR},  0, 0, FLAGS, "out" },
-    { "sbs2r", "side by side half width right first", 0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_2_RL},  0, 0, FLAGS, "out" },
-    { "sbsl",  "side by side left first",             0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_LR},    0, 0, FLAGS, "out" },
-    { "sbsr",  "side by side right first",            0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_RL},    0, 0, FLAGS, "out" },
-    { "chl",   "checkerboard left first",             0, AV_OPT_TYPE_CONST, {.i64=CHECKERBOARD_LR},    0, 0, FLAGS, "out" },
-    { "chr",   "checkerboard right first",            0, AV_OPT_TYPE_CONST, {.i64=CHECKERBOARD_RL},    0, 0, FLAGS, "out" },
-    { "icl",   "interleave columns left first",       0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_COLS_LR}, 0, 0, FLAGS, "out" },
-    { "icr",   "interleave columns right first",      0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_COLS_RL}, 0, 0, FLAGS, "out" },
-    { "hdmi",  "HDMI frame pack",                     0, AV_OPT_TYPE_CONST, {.i64=HDMI},               0, 0, FLAGS, "out" },
+    { "in",    "set input format",  OFFSET(in.format),   AV_OPT_TYPE_INT,   {.i64=SIDE_BY_SIDE_LR}, INTERLEAVE_ROWS_LR, STEREO_CODE_COUNT-1, FLAGS, .unit = "in"},
+    { "ab2l",  "above below half height left first",  0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_LR},   0, 0, FLAGS, .unit = "in" },
+    { "tb2l",  "above below half height left first",  0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_LR},   0, 0, FLAGS, .unit = "in" },
+    { "ab2r",  "above below half height right first", 0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_RL},   0, 0, FLAGS, .unit = "in" },
+    { "tb2r",  "above below half height right first", 0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_RL},   0, 0, FLAGS, .unit = "in" },
+    { "abl",   "above below left first",              0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_LR},     0, 0, FLAGS, .unit = "in" },
+    { "tbl",   "above below left first",              0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_LR},     0, 0, FLAGS, .unit = "in" },
+    { "abr",   "above below right first",             0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_RL},     0, 0, FLAGS, .unit = "in" },
+    { "tbr",   "above below right first",             0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_RL},     0, 0, FLAGS, .unit = "in" },
+    { "al",    "alternating frames left first",       0, AV_OPT_TYPE_CONST, {.i64=ALTERNATING_LR},     0, 0, FLAGS, .unit = "in" },
+    { "ar",    "alternating frames right first",      0, AV_OPT_TYPE_CONST, {.i64=ALTERNATING_RL},     0, 0, FLAGS, .unit = "in" },
+    { "sbs2l", "side by side half width left first",  0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_2_LR},  0, 0, FLAGS, .unit = "in" },
+    { "sbs2r", "side by side half width right first", 0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_2_RL},  0, 0, FLAGS, .unit = "in" },
+    { "sbsl",  "side by side left first",             0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_LR},    0, 0, FLAGS, .unit = "in" },
+    { "sbsr",  "side by side right first",            0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_RL},    0, 0, FLAGS, .unit = "in" },
+    { "irl",   "interleave rows left first",          0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_ROWS_LR}, 0, 0, FLAGS, .unit = "in" },
+    { "irr",   "interleave rows right first",         0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_ROWS_RL}, 0, 0, FLAGS, .unit = "in" },
+    { "icl",   "interleave columns left first",       0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_COLS_LR}, 0, 0, FLAGS, .unit = "in" },
+    { "icr",   "interleave columns right first",      0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_COLS_RL}, 0, 0, FLAGS, .unit = "in" },
+    { "out",   "set output format", OFFSET(out.format),  AV_OPT_TYPE_INT,   {.i64=ANAGLYPH_RC_DUBOIS}, 0, STEREO_CODE_COUNT-1, FLAGS, .unit = "out"},
+    { "ab2l",  "above below half height left first",  0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_LR},   0, 0, FLAGS, .unit = "out" },
+    { "tb2l",  "above below half height left first",  0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_LR},   0, 0, FLAGS, .unit = "out" },
+    { "ab2r",  "above below half height right first", 0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_RL},   0, 0, FLAGS, .unit = "out" },
+    { "tb2r",  "above below half height right first", 0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_2_RL},   0, 0, FLAGS, .unit = "out" },
+    { "abl",   "above below left first",              0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_LR},     0, 0, FLAGS, .unit = "out" },
+    { "tbl",   "above below left first",              0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_LR},     0, 0, FLAGS, .unit = "out" },
+    { "abr",   "above below right first",             0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_RL},     0, 0, FLAGS, .unit = "out" },
+    { "tbr",   "above below right first",             0, AV_OPT_TYPE_CONST, {.i64=ABOVE_BELOW_RL},     0, 0, FLAGS, .unit = "out" },
+    { "agmc",  "anaglyph green magenta color",        0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_GM_COLOR},  0, 0, FLAGS, .unit = "out" },
+    { "agmd",  "anaglyph green magenta dubois",       0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_GM_DUBOIS}, 0, 0, FLAGS, .unit = "out" },
+    { "agmg",  "anaglyph green magenta gray",         0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_GM_GRAY},   0, 0, FLAGS, .unit = "out" },
+    { "agmh",  "anaglyph green magenta half color",   0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_GM_HALF},   0, 0, FLAGS, .unit = "out" },
+    { "al",    "alternating frames left first",       0, AV_OPT_TYPE_CONST, {.i64=ALTERNATING_LR},     0, 0, FLAGS, .unit = "out" },
+    { "ar",    "alternating frames right first",      0, AV_OPT_TYPE_CONST, {.i64=ALTERNATING_RL},     0, 0, FLAGS, .unit = "out" },
+    { "arbg",  "anaglyph red blue gray",              0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RB_GRAY},   0, 0, FLAGS, .unit = "out" },
+    { "arcc",  "anaglyph red cyan color",             0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RC_COLOR},  0, 0, FLAGS, .unit = "out" },
+    { "arcd",  "anaglyph red cyan dubois",            0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RC_DUBOIS}, 0, 0, FLAGS, .unit = "out" },
+    { "arcg",  "anaglyph red cyan gray",              0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RC_GRAY},   0, 0, FLAGS, .unit = "out" },
+    { "arch",  "anaglyph red cyan half color",        0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RC_HALF},   0, 0, FLAGS, .unit = "out" },
+    { "argg",  "anaglyph red green gray",             0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_RG_GRAY},   0, 0, FLAGS, .unit = "out" },
+    { "aybc",  "anaglyph yellow blue color",          0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_YB_COLOR},  0, 0, FLAGS, .unit = "out" },
+    { "aybd",  "anaglyph yellow blue dubois",         0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_YB_DUBOIS}, 0, 0, FLAGS, .unit = "out" },
+    { "aybg",  "anaglyph yellow blue gray",           0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_YB_GRAY},   0, 0, FLAGS, .unit = "out" },
+    { "aybh",  "anaglyph yellow blue half color",     0, AV_OPT_TYPE_CONST, {.i64=ANAGLYPH_YB_HALF},   0, 0, FLAGS, .unit = "out" },
+    { "irl",   "interleave rows left first",          0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_ROWS_LR}, 0, 0, FLAGS, .unit = "out" },
+    { "irr",   "interleave rows right first",         0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_ROWS_RL}, 0, 0, FLAGS, .unit = "out" },
+    { "ml",    "mono left",                           0, AV_OPT_TYPE_CONST, {.i64=MONO_L},             0, 0, FLAGS, .unit = "out" },
+    { "mr",    "mono right",                          0, AV_OPT_TYPE_CONST, {.i64=MONO_R},             0, 0, FLAGS, .unit = "out" },
+    { "sbs2l", "side by side half width left first",  0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_2_LR},  0, 0, FLAGS, .unit = "out" },
+    { "sbs2r", "side by side half width right first", 0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_2_RL},  0, 0, FLAGS, .unit = "out" },
+    { "sbsl",  "side by side left first",             0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_LR},    0, 0, FLAGS, .unit = "out" },
+    { "sbsr",  "side by side right first",            0, AV_OPT_TYPE_CONST, {.i64=SIDE_BY_SIDE_RL},    0, 0, FLAGS, .unit = "out" },
+    { "chl",   "checkerboard left first",             0, AV_OPT_TYPE_CONST, {.i64=CHECKERBOARD_LR},    0, 0, FLAGS, .unit = "out" },
+    { "chr",   "checkerboard right first",            0, AV_OPT_TYPE_CONST, {.i64=CHECKERBOARD_RL},    0, 0, FLAGS, .unit = "out" },
+    { "icl",   "interleave columns left first",       0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_COLS_LR}, 0, 0, FLAGS, .unit = "out" },
+    { "icr",   "interleave columns right first",      0, AV_OPT_TYPE_CONST, {.i64=INTERLEAVE_COLS_RL}, 0, 0, FLAGS, .unit = "out" },
+    { "hdmi",  "HDMI frame pack",                     0, AV_OPT_TYPE_CONST, {.i64=HDMI},               0, 0, FLAGS, .unit = "out" },
     { NULL }
 };
 
@@ -283,7 +283,6 @@ static int query_formats(AVFilterContext *ctx)
 {
     Stereo3DContext *s = ctx->priv;
     const enum AVPixelFormat *pix_fmts;
-    AVFilterFormats *fmts_list;
 
     switch (s->out.format) {
     case ANAGLYPH_GM_COLOR:
@@ -306,10 +305,7 @@ static int query_formats(AVFilterContext *ctx)
         pix_fmts = other_pix_fmts;
     }
 
-    fmts_list = ff_make_format_list(pix_fmts);
-    if (!fmts_list)
-        return AVERROR(ENOMEM);
-    return ff_set_common_formats(ctx, fmts_list);
+    return ff_set_common_formats_from_list(ctx, pix_fmts);
 }
 
 static inline uint8_t ana_convert(const int *coeff, const uint8_t *left, const uint8_t *right)
@@ -595,8 +591,9 @@ static int config_output(AVFilterLink *outlink)
     s->vsub = desc->log2_chroma_h;
 
     s->dsp.anaglyph = anaglyph;
-    if (ARCH_X86)
-        ff_stereo3d_init_x86(&s->dsp);
+#if ARCH_X86
+    ff_stereo3d_init_x86(&s->dsp);
+#endif
 
     return 0;
 }
@@ -941,8 +938,8 @@ copy:
             ThreadData td;
 
             td.ileft = ileft; td.iright = iright; td.out = out;
-            ctx->internal->execute(ctx, filter_slice, &td, NULL,
-                                   FFMIN(s->out.height, ff_filter_get_nb_threads(ctx)));
+            ff_filter_execute(ctx, filter_slice, &td, NULL,
+                              FFMIN(s->out.height, ff_filter_get_nb_threads(ctx)));
         }
         break;
     }
@@ -1100,7 +1097,6 @@ static const AVFilterPad stereo3d_inputs[] = {
         .type         = AVMEDIA_TYPE_VIDEO,
         .filter_frame = filter_frame,
     },
-    { NULL }
 };
 
 static const AVFilterPad stereo3d_outputs[] = {
@@ -1109,17 +1105,16 @@ static const AVFilterPad stereo3d_outputs[] = {
         .type         = AVMEDIA_TYPE_VIDEO,
         .config_props = config_output,
     },
-    { NULL }
 };
 
-AVFilter ff_vf_stereo3d = {
+const AVFilter ff_vf_stereo3d = {
     .name          = "stereo3d",
     .description   = NULL_IF_CONFIG_SMALL("Convert video stereoscopic 3D view."),
     .priv_size     = sizeof(Stereo3DContext),
     .uninit        = uninit,
-    .query_formats = query_formats,
-    .inputs        = stereo3d_inputs,
-    .outputs       = stereo3d_outputs,
+    FILTER_INPUTS(stereo3d_inputs),
+    FILTER_OUTPUTS(stereo3d_outputs),
+    FILTER_QUERY_FUNC(query_formats),
     .priv_class    = &stereo3d_class,
     .flags         = AVFILTER_FLAG_SLICE_THREADS,
 };

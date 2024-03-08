@@ -19,17 +19,13 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
 #define CACHED_BITSTREAM_READER !ARCH_X86_32
 #define SHEER_VLC_BITS 12
 
 #include "libavutil/intreadwrite.h"
 #include "avcodec.h"
+#include "codec_internal.h"
 #include "get_bits.h"
-#include "internal.h"
 #include "thread.h"
 #include "sheervideodata.h"
 
@@ -1784,11 +1780,10 @@ static void decode_rgb(AVCodecContext *avctx, AVFrame *p, GetBitContext *gb)
 static av_cold int build_vlc(VLC *vlc, const SheerTable *table)
 {
     const uint8_t *cur = table->lens;
-    uint16_t codes[1024];
     uint8_t  lens[1024];
     unsigned count = 0;
 
-    for (unsigned step = 1, len = 1, index = 0; len > 0; len += step) {
+    for (int step = 1, len = 1; len > 0; len += step) {
         unsigned new_count = count;
 
         if (len == 16) {
@@ -1797,27 +1792,20 @@ static av_cold int build_vlc(VLC *vlc, const SheerTable *table)
         } else
             new_count += *cur++;
 
-        for (; count < new_count; count++) {
-            codes[count] = index >> (32 - len);
-            index       += 1U    << (32 - len);
+        for (; count < new_count; count++)
             lens[count]  = len;
-        }
     }
 
-    ff_free_vlc(vlc);
-    return init_vlc(vlc, SHEER_VLC_BITS, count,
-                    lens,  sizeof(*lens),  sizeof(*lens),
-                    codes, sizeof(*codes), sizeof(*codes), 0);
+    ff_vlc_free(vlc);
+    return ff_vlc_init_from_lengths(vlc, SHEER_VLC_BITS, count,
+                                    lens, sizeof(*lens), NULL, 0, 0, 0, 0, NULL);
 }
 
-static int decode_frame(AVCodecContext *avctx,
-                        void *data, int *got_frame,
-                        AVPacket *avpkt)
+static int decode_frame(AVCodecContext *avctx, AVFrame *p,
+                        int *got_frame, AVPacket *avpkt)
 {
     SheerVideoContext *s = avctx->priv_data;
-    ThreadFrame frame = { .f = data };
     const SheerTable *table;
-    AVFrame *p = data;
     GetBitContext gb;
     unsigned format;
     int ret;
@@ -1985,9 +1973,9 @@ static int decode_frame(AVCodecContext *avctx,
     }
 
     p->pict_type = AV_PICTURE_TYPE_I;
-    p->key_frame = 1;
+    p->flags |= AV_FRAME_FLAG_KEY;
 
-    if ((ret = ff_thread_get_buffer(avctx, &frame, 0)) < 0)
+    if ((ret = ff_thread_get_buffer(avctx, p, 0)) < 0)
         return ret;
 
     if ((ret = init_get_bits8(&gb, avpkt->data + 20, avpkt->size - 20)) < 0)
@@ -2004,19 +1992,19 @@ static av_cold int decode_end(AVCodecContext *avctx)
 {
     SheerVideoContext *s = avctx->priv_data;
 
-    ff_free_vlc(&s->vlc[0]);
-    ff_free_vlc(&s->vlc[1]);
+    ff_vlc_free(&s->vlc[0]);
+    ff_vlc_free(&s->vlc[1]);
 
     return 0;
 }
 
-AVCodec ff_sheervideo_decoder = {
-    .name             = "sheervideo",
-    .long_name        = NULL_IF_CONFIG_SMALL("BitJazz SheerVideo"),
-    .type             = AVMEDIA_TYPE_VIDEO,
-    .id               = AV_CODEC_ID_SHEERVIDEO,
+const FFCodec ff_sheervideo_decoder = {
+    .p.name           = "sheervideo",
+    CODEC_LONG_NAME("BitJazz SheerVideo"),
+    .p.type           = AVMEDIA_TYPE_VIDEO,
+    .p.id             = AV_CODEC_ID_SHEERVIDEO,
+    .p.capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS,
     .priv_data_size   = sizeof(SheerVideoContext),
     .close            = decode_end,
-    .decode           = decode_frame,
-    .capabilities     = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS,
+    FF_CODEC_DECODE_CB(decode_frame),
 };

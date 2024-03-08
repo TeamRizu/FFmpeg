@@ -32,22 +32,19 @@
  * @author Maxim Gavrilov ( maxim.gavrilov gmail com )
  */
 
-#define FFT_FLOAT 1
-#define FFT_FIXED_32 0
 #define USE_FIXED 0
+#define TX_TYPE AV_TX_FLOAT_MDCT
 
 #include "libavutil/float_dsp.h"
 #include "libavutil/opt.h"
 #include "avcodec.h"
-#include "internal.h"
+#include "codec_internal.h"
 #include "get_bits.h"
-#include "fft.h"
-#include "mdct15.h"
-#include "lpc.h"
 #include "kbdwin.h"
 #include "sinewin.h"
 
 #include "aac.h"
+#include "aacdec.h"
 #include "aactab.h"
 #include "aacdectab.h"
 #include "adts_header.h"
@@ -68,6 +65,11 @@
 #elif ARCH_MIPS
 #   include "mips/aacdec_mips.h"
 #endif
+
+DECLARE_ALIGNED(32, static INTFLOAT, AAC_RENAME(sine_120))[120];
+DECLARE_ALIGNED(32, static INTFLOAT, AAC_RENAME(sine_960))[960];
+DECLARE_ALIGNED(32, static INTFLOAT, AAC_RENAME(aac_kbd_long_960))[960];
+DECLARE_ALIGNED(32, static INTFLOAT, AAC_RENAME(aac_kbd_short_120))[120];
 
 static av_always_inline void reset_predict_state(PredictorState *ps)
 {
@@ -207,7 +209,7 @@ static av_always_inline void predict(PredictorState *ps, float *coef,
  *
  * @param   index   index into coupling gain array
  */
-static void apply_dependent_coupling(AACContext *ac,
+static void apply_dependent_coupling(AACDecContext *ac,
                                      SingleChannelElement *target,
                                      ChannelElement *cce, int index)
 {
@@ -243,7 +245,7 @@ static void apply_dependent_coupling(AACContext *ac,
  *
  * @param   index   index into coupling gain array
  */
-static void apply_independent_coupling(AACContext *ac,
+static void apply_independent_coupling(AACDecContext *ac,
                                        SingleChannelElement *target,
                                        ChannelElement *cce, int index)
 {
@@ -260,7 +262,7 @@ static void apply_independent_coupling(AACContext *ac,
 #define LOAS_SYNC_WORD   0x2b7       ///< 11 bits LOAS sync word
 
 struct LATMContext {
-    AACContext aac_ctx;     ///< containing AACContext
+    AACDecContext aac_ctx;  ///< containing AACContext
     int initialized;        ///< initialized after a valid extradata was seen
 
     // parser data
@@ -279,7 +281,7 @@ static inline uint32_t latm_get_value(GetBitContext *b)
 static int latm_decode_audio_specific_config(struct LATMContext *latmctx,
                                              GetBitContext *gb, int asclen)
 {
-    AACContext *ac        = &latmctx->aac_ctx;
+    AACDecContext *ac     = &latmctx->aac_ctx;
     AVCodecContext *avctx = ac->avctx;
     MPEG4AudioConfig m4ac = { 0 };
     GetBitContext gbc;
@@ -476,7 +478,7 @@ static int read_audio_mux_element(struct LATMContext *latmctx,
 }
 
 
-static int latm_decode_frame(AVCodecContext *avctx, void *out,
+static int latm_decode_frame(AVCodecContext *avctx, AVFrame *out,
                              int *got_frame_ptr, AVPacket *avpkt)
 {
     struct LATMContext *latmctx = avctx->priv_data;
@@ -548,24 +550,24 @@ static av_cold int latm_decode_init(AVCodecContext *avctx)
     return ret;
 }
 
-AVCodec ff_aac_decoder = {
-    .name            = "aac",
-    .long_name       = NULL_IF_CONFIG_SMALL("AAC (Advanced Audio Coding)"),
-    .type            = AVMEDIA_TYPE_AUDIO,
-    .id              = AV_CODEC_ID_AAC,
-    .priv_data_size  = sizeof(AACContext),
+const FFCodec ff_aac_decoder = {
+    .p.name          = "aac",
+    CODEC_LONG_NAME("AAC (Advanced Audio Coding)"),
+    .p.type          = AVMEDIA_TYPE_AUDIO,
+    .p.id            = AV_CODEC_ID_AAC,
+    .priv_data_size  = sizeof(AACDecContext),
     .init            = aac_decode_init,
     .close           = aac_decode_close,
-    .decode          = aac_decode_frame,
-    .sample_fmts     = (const enum AVSampleFormat[]) {
+    FF_CODEC_DECODE_CB(aac_decode_frame),
+    .p.sample_fmts   = (const enum AVSampleFormat[]) {
         AV_SAMPLE_FMT_FLTP, AV_SAMPLE_FMT_NONE
     },
-    .capabilities    = AV_CODEC_CAP_CHANNEL_CONF | AV_CODEC_CAP_DR1,
-    .caps_internal   = FF_CODEC_CAP_INIT_THREADSAFE | FF_CODEC_CAP_INIT_CLEANUP,
-    .channel_layouts = aac_channel_layout,
+    .p.capabilities  = AV_CODEC_CAP_CHANNEL_CONF | AV_CODEC_CAP_DR1,
+    .caps_internal   = FF_CODEC_CAP_INIT_CLEANUP,
+    .p.ch_layouts    = ff_aac_ch_layout,
     .flush = flush,
-    .priv_class      = &aac_decoder_class,
-    .profiles        = NULL_IF_CONFIG_SMALL(ff_aac_profiles),
+    .p.priv_class    = &aac_decoder_class,
+    .p.profiles      = NULL_IF_CONFIG_SMALL(ff_aac_profiles),
 };
 
 /*
@@ -573,21 +575,21 @@ AVCodec ff_aac_decoder = {
     in MPEG transport streams which only contain one program.
     To do a more complex LATM demuxing a separate LATM demuxer should be used.
 */
-AVCodec ff_aac_latm_decoder = {
-    .name            = "aac_latm",
-    .long_name       = NULL_IF_CONFIG_SMALL("AAC LATM (Advanced Audio Coding LATM syntax)"),
-    .type            = AVMEDIA_TYPE_AUDIO,
-    .id              = AV_CODEC_ID_AAC_LATM,
+const FFCodec ff_aac_latm_decoder = {
+    .p.name          = "aac_latm",
+    CODEC_LONG_NAME("AAC LATM (Advanced Audio Coding LATM syntax)"),
+    .p.type          = AVMEDIA_TYPE_AUDIO,
+    .p.id            = AV_CODEC_ID_AAC_LATM,
     .priv_data_size  = sizeof(struct LATMContext),
     .init            = latm_decode_init,
     .close           = aac_decode_close,
-    .decode          = latm_decode_frame,
-    .sample_fmts     = (const enum AVSampleFormat[]) {
+    FF_CODEC_DECODE_CB(latm_decode_frame),
+    .p.sample_fmts   = (const enum AVSampleFormat[]) {
         AV_SAMPLE_FMT_FLTP, AV_SAMPLE_FMT_NONE
     },
-    .capabilities    = AV_CODEC_CAP_CHANNEL_CONF | AV_CODEC_CAP_DR1,
-    .caps_internal   = FF_CODEC_CAP_INIT_THREADSAFE | FF_CODEC_CAP_INIT_CLEANUP,
-    .channel_layouts = aac_channel_layout,
+    .p.capabilities  = AV_CODEC_CAP_CHANNEL_CONF | AV_CODEC_CAP_DR1,
+    .caps_internal   = FF_CODEC_CAP_INIT_CLEANUP,
+    .p.ch_layouts    = ff_aac_ch_layout,
     .flush = flush,
-    .profiles        = NULL_IF_CONFIG_SMALL(ff_aac_profiles),
+    .p.profiles      = NULL_IF_CONFIG_SMALL(ff_aac_profiles),
 };

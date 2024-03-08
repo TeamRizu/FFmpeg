@@ -19,7 +19,10 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include "config_components.h"
+
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 #include "libavutil/opt.h"
 
@@ -37,12 +40,12 @@ static int g726_read_header(AVFormatContext *s)
         return AVERROR(ENOMEM);
 
     st->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
-    st->codecpar->codec_id   = s->iformat->raw_codec_id;
+    st->codecpar->codec_id   = ffifmt(s->iformat)->raw_codec_id;
 
     st->codecpar->sample_rate           = c->sample_rate;
     st->codecpar->bits_per_coded_sample = c->code_size;
     st->codecpar->bit_rate              = ((int[]){ 16000, 24000, 32000, 40000 })[c->code_size - 2];
-    st->codecpar->channels              = 1;
+    st->codecpar->ch_layout.nb_channels = 1;
 
     return 0;
 }
@@ -65,40 +68,33 @@ static const AVOption options[] = {
     { NULL },
 };
 
-#if CONFIG_G726_DEMUXER
-static const AVClass g726le_demuxer_class = {
-    .class_name     = "G.726 big-endian demuxer",
+static const AVClass g726_demuxer_class = {
+    .class_name     = "G.726 demuxer",
     .item_name      = av_default_item_name,
     .option         = options,
     .version        = LIBAVUTIL_VERSION_INT,
 };
 
-AVInputFormat ff_g726_demuxer = {
-    .name           = "g726",
-    .long_name      = NULL_IF_CONFIG_SMALL("raw big-endian G.726 (\"left aligned\")"),
+#if CONFIG_G726_DEMUXER
+const FFInputFormat ff_g726_demuxer = {
+    .p.name         = "g726",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("raw big-endian G.726 (\"left aligned\")"),
+    .p.priv_class   = &g726_demuxer_class,
     .read_header    = g726_read_header,
     .read_packet    = g726_read_packet,
     .priv_data_size = sizeof(G726Context),
-    .priv_class     = &g726le_demuxer_class,
     .raw_codec_id   = AV_CODEC_ID_ADPCM_G726,
 };
 #endif
 
 #if CONFIG_G726LE_DEMUXER
-static const AVClass g726_demuxer_class = {
-    .class_name     = "G.726 little-endian demuxer",
-    .item_name      = av_default_item_name,
-    .option         = options,
-    .version        = LIBAVUTIL_VERSION_INT,
-};
-
-AVInputFormat ff_g726le_demuxer = {
-    .name           = "g726le",
-    .long_name      = NULL_IF_CONFIG_SMALL("raw little-endian G.726 (\"right aligned\")"),
+const FFInputFormat ff_g726le_demuxer = {
+    .p.name         = "g726le",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("raw little-endian G.726 (\"right aligned\")"),
+    .p.priv_class   = &g726_demuxer_class,
     .read_header    = g726_read_header,
     .read_packet    = g726_read_packet,
     .priv_data_size = sizeof(G726Context),
-    .priv_class     = &g726_demuxer_class,
     .raw_codec_id   = AV_CODEC_ID_ADPCM_G726LE,
 };
 #endif

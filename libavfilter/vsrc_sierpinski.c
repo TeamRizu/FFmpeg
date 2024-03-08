@@ -24,13 +24,11 @@
  */
 
 #include "avfilter.h"
-#include "formats.h"
 #include "video.h"
 #include "internal.h"
 #include "libavutil/imgutils.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/opt.h"
-#include "libavutil/parseutils.h"
 #include "libavutil/lfg.h"
 #include "libavutil/random_seed.h"
 #include <float.h>
@@ -63,26 +61,13 @@ static const AVOption sierpinski_options[] = {
     {"r",    "set frame rate", OFFSET(frame_rate), AV_OPT_TYPE_VIDEO_RATE, {.str="25"},      0,    INT_MAX, FLAGS },
     {"seed", "set the seed",   OFFSET(seed),       AV_OPT_TYPE_INT64,      {.i64=-1},       -1, UINT32_MAX, FLAGS },
     {"jump", "set the jump",   OFFSET(jump),       AV_OPT_TYPE_INT,        {.i64=100},       1,      10000, FLAGS },
-    {"type","set fractal type",OFFSET(type),       AV_OPT_TYPE_INT,        {.i64=0},         0,          1, FLAGS, "type" },
-    {"carpet", "sierpinski carpet", 0,             AV_OPT_TYPE_CONST,      {.i64=0},         0,          0, FLAGS, "type" },
-    {"triangle", "sierpinski triangle", 0,         AV_OPT_TYPE_CONST,      {.i64=1},         0,          0, FLAGS, "type" },
+    {"type","set fractal type",OFFSET(type),       AV_OPT_TYPE_INT,        {.i64=0},         0,          1, FLAGS, .unit = "type" },
+    {"carpet", "sierpinski carpet", 0,             AV_OPT_TYPE_CONST,      {.i64=0},         0,          0, FLAGS, .unit = "type" },
+    {"triangle", "sierpinski triangle", 0,         AV_OPT_TYPE_CONST,      {.i64=1},         0,          0, FLAGS, .unit = "type" },
     {NULL},
 };
 
 AVFILTER_DEFINE_CLASS(sierpinski);
-
-static int query_formats(AVFilterContext *ctx)
-{
-    static const enum AVPixelFormat pix_fmts[] = {
-        AV_PIX_FMT_0BGR32,
-        AV_PIX_FMT_NONE
-    };
-
-    AVFilterFormats *fmts_list = ff_make_format_list(pix_fmts);
-    if (!fmts_list)
-        return AVERROR(ENOMEM);
-    return ff_set_common_formats(ctx, fmts_list);
-}
 
 static int fill_sierpinski(SierpinskiContext *s, int x, int y)
 {
@@ -150,18 +135,19 @@ static int draw_carpet_slice(AVFilterContext *ctx, void *arg, int job, int nb_jo
     return 0;
 }
 
-static int config_output(AVFilterLink *inlink)
+static int config_output(AVFilterLink *outlink)
 {
-    AVFilterContext *ctx = inlink->src;
+    AVFilterContext *ctx = outlink->src;
     SierpinskiContext *s = ctx->priv;
 
     if (av_image_check_size(s->w, s->h, 0, ctx) < 0)
         return AVERROR(EINVAL);
 
-    inlink->w = s->w;
-    inlink->h = s->h;
-    inlink->time_base = av_inv_q(s->frame_rate);
-    inlink->sample_aspect_ratio = (AVRational) {1, 1};
+    outlink->w = s->w;
+    outlink->h = s->h;
+    outlink->time_base = av_inv_q(s->frame_rate);
+    outlink->sample_aspect_ratio = (AVRational) {1, 1};
+    outlink->frame_rate = s->frame_rate;
     if (s->seed == -1)
         s->seed = av_get_random_seed();
     av_lfg_init(&s->lfg, s->seed);
@@ -194,7 +180,8 @@ static void draw_sierpinski(AVFilterContext *ctx, AVFrame *frame)
             s->pos_y--;
     }
 
-    ctx->internal->execute(ctx, s->draw_slice, frame, NULL, FFMIN(outlink->h, ff_filter_get_nb_threads(ctx)));
+    ff_filter_execute(ctx, s->draw_slice, frame, NULL,
+                      FFMIN(outlink->h, ff_filter_get_nb_threads(ctx)));
 }
 
 static int sierpinski_request_frame(AVFilterLink *link)
@@ -207,6 +194,7 @@ static int sierpinski_request_frame(AVFilterLink *link)
 
     frame->sample_aspect_ratio = (AVRational) {1, 1};
     frame->pts = s->pts++;
+    frame->duration = 1;
 
     draw_sierpinski(link->src, frame);
 
@@ -220,16 +208,15 @@ static const AVFilterPad sierpinski_outputs[] = {
         .request_frame = sierpinski_request_frame,
         .config_props  = config_output,
     },
-    { NULL }
 };
 
-AVFilter ff_vsrc_sierpinski = {
+const AVFilter ff_vsrc_sierpinski = {
     .name          = "sierpinski",
     .description   = NULL_IF_CONFIG_SMALL("Render a Sierpinski fractal."),
     .priv_size     = sizeof(SierpinskiContext),
     .priv_class    = &sierpinski_class,
-    .query_formats = query_formats,
     .inputs        = NULL,
-    .outputs       = sierpinski_outputs,
+    FILTER_OUTPUTS(sierpinski_outputs),
+    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_0BGR32),
     .flags         = AVFILTER_FLAG_SLICE_THREADS,
 };

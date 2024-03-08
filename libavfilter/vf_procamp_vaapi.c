@@ -17,15 +17,13 @@
  */
 #include <string.h>
 
-#include "libavutil/avassert.h"
-#include "libavutil/mem.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
 
 #include "avfilter.h"
-#include "formats.h"
 #include "internal.h"
 #include "vaapi_vpp.h"
+#include "video.h"
 
 // ProcAmp Min/Max/Default Values
 #define BRIGHTNESS_MIN     -100.0F
@@ -138,6 +136,9 @@ static int procamp_vaapi_filter_frame(AVFilterLink *inlink, AVFrame *input_frame
            av_get_pix_fmt_name(input_frame->format),
            input_frame->width, input_frame->height, input_frame->pts);
 
+    if (vpp_ctx->passthrough)
+        return ff_filter_frame(outlink, input_frame);
+
     if (vpp_ctx->va_context == VA_INVALID_ID)
         return AVERROR(EINVAL);
 
@@ -181,11 +182,18 @@ fail:
 static av_cold int procamp_vaapi_init(AVFilterContext *avctx)
 {
     VAAPIVPPContext *vpp_ctx = avctx->priv;
+    ProcampVAAPIContext *ctx = avctx->priv;
+    float eps = 1.0e-10f;
 
     ff_vaapi_vpp_ctx_init(avctx);
     vpp_ctx->pipeline_uninit     = ff_vaapi_vpp_pipeline_uninit;
     vpp_ctx->build_filter_params = procamp_vaapi_build_filter_params;
     vpp_ctx->output_format       = AV_PIX_FMT_NONE;
+    if (fabs(ctx->saturation - SATURATION_DEFAULT) < eps &&
+        fabs(ctx->bright - BRIGHTNESS_DEFAULT) < eps &&
+        fabs(ctx->contrast - CONTRAST_DEFAULT) < eps &&
+        fabs(ctx->hue - HUE_DEFAULT) < eps)
+        vpp_ctx->passthrough = 1;
 
     return 0;
 }
@@ -221,7 +229,6 @@ static const AVFilterPad procamp_vaapi_inputs[] = {
         .filter_frame = &procamp_vaapi_filter_frame,
         .config_props = &ff_vaapi_vpp_config_input,
     },
-    { NULL }
 };
 
 static const AVFilterPad procamp_vaapi_outputs[] = {
@@ -230,18 +237,17 @@ static const AVFilterPad procamp_vaapi_outputs[] = {
         .type = AVMEDIA_TYPE_VIDEO,
         .config_props = &ff_vaapi_vpp_config_output,
     },
-    { NULL }
 };
 
-AVFilter ff_vf_procamp_vaapi = {
+const AVFilter ff_vf_procamp_vaapi = {
     .name          = "procamp_vaapi",
     .description   = NULL_IF_CONFIG_SMALL("ProcAmp (color balance) adjustments for hue, saturation, brightness, contrast"),
     .priv_size     = sizeof(ProcampVAAPIContext),
     .init          = &procamp_vaapi_init,
     .uninit        = &ff_vaapi_vpp_ctx_uninit,
-    .query_formats = &ff_vaapi_vpp_query_formats,
-    .inputs        = procamp_vaapi_inputs,
-    .outputs       = procamp_vaapi_outputs,
+    FILTER_INPUTS(procamp_vaapi_inputs),
+    FILTER_OUTPUTS(procamp_vaapi_outputs),
+    FILTER_QUERY_FUNC(&ff_vaapi_vpp_query_formats),
     .priv_class    = &procamp_vaapi_class,
     .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
 };

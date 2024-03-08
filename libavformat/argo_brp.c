@@ -21,6 +21,7 @@
  */
 
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/avassert.h"
@@ -230,7 +231,7 @@ static int argo_brp_read_header(AVFormatContext *s)
             st->codecpar->width  = bvid->width;
             st->codecpar->height = bvid->height;
             st->nb_frames = bvid->num_frames;
-            st->codecpar->bits_per_raw_sample = bvid->depth;
+            st->codecpar->bits_per_coded_sample = bvid->depth;
         } else if (hdr->codec_id == BRP_CODEC_ID_BASF) {
             /*
              * It would make the demuxer significantly more complicated
@@ -413,9 +414,9 @@ static int argo_brp_read_packet(AVFormatContext *s, AVPacket *pkt)
     return 0;
 }
 
-AVInputFormat ff_argo_brp_demuxer = {
-    .name           = "argo_brp",
-    .long_name      = NULL_IF_CONFIG_SMALL("Argonaut Games BRP"),
+const FFInputFormat ff_argo_brp_demuxer = {
+    .p.name         = "argo_brp",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("Argonaut Games BRP"),
     .priv_data_size = sizeof(ArgoBRPDemuxContext),
     .read_probe     = argo_brp_probe,
     .read_header    = argo_brp_read_header,
